@@ -65,8 +65,7 @@ const hex = (h) => [
 const BRAND_A = hex('#ff6b4a');
 const BRAND_B = hex('#ff8f6b');
 const WHITE = [255, 255, 255];
-const FLAME = hex('#ffd76b');
-const PLATE = hex('#ffe2d6');
+const INK = hex('#5a1a08');       // dark ring detail, reads against the brand fill
 
 const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 
@@ -90,6 +89,49 @@ function inCircle(x, y, cx, cy, r) {
   return dx * dx + dy * dy <= r * r;
 }
 
+/** A ring (annulus) — the wheel. */
+function inRing(x, y, cx, cy, rOut, rIn) {
+  const dx = x - cx;
+  const dy = y - cy;
+  const d = dx * dx + dy * dy;
+  return d <= rOut * rOut && d >= rIn * rIn;
+}
+
+// A delivery motorcycle, in 0..1 glyph space. Chosen for legibility at 48px on
+// a home screen: two ring wheels read as "wheels" even at that size, where the
+// previous cake's candle and tiers turned to mush.
+const WHEEL_Y = 0.755;
+const REAR_X = 0.275;
+const FRONT_X = 0.755;
+const R_OUT = 0.135;
+const R_IN = 0.082;
+
+/** Draws the motorcycle into an existing 0..1 colour sample. */
+function drawBike(gx, gy, colour) {
+  const ink = (c) => { colour = c; };
+
+  // wheels: white tyre with a dark hub, so the ring is visible at small sizes
+  for (const cx of [REAR_X, FRONT_X]) {
+    if (inRing(gx, gy, cx, WHEEL_Y, R_OUT, R_IN)) ink(WHITE);
+    if (inCircle(gx, gy, cx, WHEEL_Y, R_IN * 0.52)) ink(INK);
+  }
+
+  // frame: a single swept body from the rear wheel up to the steering head
+  if (inRoundRect(gx, gy, 0.20, 0.60, 0.63, 0.695, 0.045)) ink(WHITE);   // seat / engine block
+  if (inRoundRect(gx, gy, 0.55, 0.50, 0.80, 0.64, 0.06)) ink(WHITE);      // leg shield
+  if (inRoundRect(gx, gy, 0.60, 0.63, 0.70, 0.74, 0.03)) ink(WHITE);      // swing arm
+
+  // steering column + handlebars
+  if (inRoundRect(gx, gy, 0.675, 0.40, 0.735, 0.58, 0.025)) ink(WHITE);
+  if (inRoundRect(gx, gy, 0.615, 0.385, 0.845, 0.445, 0.028)) ink(WHITE);
+
+  // rider: helmet plus a shoulder, leaning into the bars
+  if (inCircle(gx, gy, 0.455, 0.395, 0.088)) ink(WHITE);
+  if (inRoundRect(gx, gy, 0.325, 0.455, 0.585, 0.60, 0.06)) ink(WHITE);
+
+  return colour;
+}
+
 /** One sample in normalised 0..1 coordinates → [r,g,b,a]. */
 function sample(x, y, opts) {
   const s = opts.scale;                 // glyph scale (1 = normal, 0.72 = maskable safe zone)
@@ -107,16 +149,8 @@ function sample(x, y, opts) {
     return [0, 0, 0, 0];
   }
 
-  // plate
-  if (inRoundRect(gx, gy, 0.22, 0.735, 0.78, 0.80, 0.025)) colour = PLATE;
-  // bottom tier
-  if (inRoundRect(gx, gy, 0.26, 0.535, 0.74, 0.745, 0.045)) colour = WHITE;
-  // top tier
-  if (inRoundRect(gx, gy, 0.325, 0.415, 0.675, 0.545, 0.04)) colour = WHITE;
-  // candle
-  if (inRoundRect(gx, gy, 0.482, 0.275, 0.518, 0.425, 0.012)) colour = WHITE;
-  // flame
-  if (inCircle(gx, gy, 0.5, 0.235, 0.038)) colour = FLAME;
+  // the motorcycle
+  colour = drawBike(gx, gy, colour);
 
   // soften the outer edge of the rounded square
   let alpha = 255;

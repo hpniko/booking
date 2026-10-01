@@ -1014,7 +1014,7 @@ async function router() {
   const el = $('#view');
   el.className = 'view' + (v.chatMode ? ' chat-mode' : '');
   el.scrollTop = 0;
-  el.innerHTML = `<div class="empty"><span class="big">🍰</span>Loading…</div>`;
+  el.innerHTML = `<div class="empty"><span class="big">🏍</span>Loading…</div>`;
   try {
     await v.mount(el, loc);
   } catch (err) {

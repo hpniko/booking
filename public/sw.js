@@ -7,9 +7,10 @@
 // Shell assets use STALE-WHILE-REVALIDATE (see the fetch handler below), so the
 // cache version is no longer something every code change has to remember to
 // bump. It is kept only to force a clean slate when the caching STRATEGY
-// changes — which is what v6 does.
-// v6: shell is stale-while-revalidate instead of cache-first.
-const CACHE = 'postre-booking-v6';
+// changes, or when an asset in the precache list changes in a way that matters
+// (v7: app icon changed from a cake to a motorcycle).
+// v7: motorcycle app icon.
+const CACHE = 'postre-booking-v7';
 const SHELL = [
   '/',
   '/index.html',
