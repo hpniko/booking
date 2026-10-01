@@ -3019,12 +3019,34 @@ async function riderRequestJob(id) {
   );
 }
 
+/**
+ * Nav affordance for a rider card. The button is ALWAYS rendered so the control
+ * never appears and disappears between cards — a rider learns "there's a map
+ * button on every card" instead of hunting for one. When the booking carries no
+ * usable coordinates it says so in words instead of vanishing (§R20: a missing
+ * pin must never be mistaken for "no navigation needed").
+ */
+function riderNavButton(b) {
+  if (!b.nav) {
+    return `<button class="btn small maps disabled" data-nav-none="${b.id}"
+              aria-label="No coordinates detected for this drop-off">📍<span class="nolabel">No coordinates</span></button>`;
+  }
+  return `<button class="btn small maps" data-nav-app="${b.id}"
+            aria-label="Navigate to the drop-off pin">🗺️<span class="nolabel">Navigate</span></button>`;
+}
+
 function riderJobActions(b) {
   const p = riderPrimary(b);
-  if (!p) return `<div class="bk-actions"><button class="btn primary small" data-rjob="${b.id}">Open job</button></div>`;
+  const nav = riderNavButton(b);
+  if (!p) {
+    return `<div class="bk-actions">
+        <button class="btn primary small" data-rjob="${b.id}">Open job</button>
+        ${nav}
+      </div>`;
+  }
   return `<div class="bk-actions">
       <button class="btn ${p.cls} small" data-act="${p.act}" data-id="${b.id}">${p.label}</button>
-      ${b.nav ? `<button class="btn small maps" data-nav-app="${b.id}" aria-label="Navigate to the drop-off pin">🗺️</button>` : ''}
+      ${nav}
       <button class="btn ghost small" data-rjob="${b.id}">Details</button>
     </div>`;
 }
@@ -3045,6 +3067,13 @@ function riderWireCards(el) {
     b.onclick = () => {
       const bk = findBooking(b.getAttribute('data-nav-app'));
       if (bk) openNav(bk.waze_app, bk.waze_https);
+    };
+  });
+  // No pin on this booking — say WHY rather than silently doing nothing.
+  $$('[data-nav-none]', el).forEach((b) => {
+    b.onclick = () => {
+      haptic(10);
+      toast('No coordinates detected — open the job and read the details', 'err');
     };
   });
 }
@@ -3256,6 +3285,32 @@ function riderHistoryRows(bookings) {
   }).join('');
 }
 
+/**
+ * What the rider collected and must hand back to Postre.
+ *
+ * Every peso in this block comes from the SAME split the booking was created
+ * with, so it reconciles exactly:
+ *     collected  =  delivery fees  +  rider payout  +  remitted to Postre
+ * Showing the identity is the point — the rider can check the number before
+ * handing cash in, instead of taking someone's word for it.
+ */
+function remitKw(e) {
+  const r = e.remit || {};
+  const label = esc(store.config.store_label || 'the store');
+  if (!r.jobs) {
+    return `<div class="empty" style="padding:14px">No delivered jobs in this period yet</div>`;
+  }
+  return `
+    <div class="kv"><span class="k">Collected from customers</span><span class="v money">${peso(r.collected)}</span></div>
+    <div class="kv"><span class="k">Your delivery fees</span><span class="v money">${peso(r.fees)}</span></div>
+    <div class="kv"><span class="k">Your earnings</span><span class="v money">${peso(r.payout)}</span></div>
+    <div class="kv total"><span class="k">Remit to ${label}</span><span class="v money">${peso(r.to_merchant)}</span></div>
+    <div class="range-note">
+      Across ${r.jobs} delivered job${r.jobs === 1 ? '' : 's'}. Fees + earnings + remittance =
+      ${peso(Number(r.fees || 0) + Number(r.payout || 0) + Number(r.to_merchant || 0))}, which is what you collected.
+    </div>`;
+}
+
 views['rider/history'] = {
   title: 'My history',
   tab: 'history',
@@ -3268,6 +3323,7 @@ views['rider/history'] = {
         <button class="chip${riderHistoryAll ? '' : ' active'}" data-ha="0">Today</button>
         <button class="chip${riderHistoryAll ? ' active' : ''}" data-ha="1">All time</button>
       </div>
+      ${section('Deliveries remitted to us', `<div class="card tight">${remitKw(e)}</div>`)}
       <div class="card">${earningsKw(e)}
         <button class="btn primary block small" id="req-payout" style="margin-top:10px">Request a payout</button>
       </div>

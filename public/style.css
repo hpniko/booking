@@ -379,6 +379,21 @@ a { color: var(--blue); text-decoration: none; }
 .bk-actions { display: flex; gap: 8px; margin-top: 11px; }
 .bk-actions .btn { flex: 1; }
 
+/* Nav button on a rider card. Always present (see riderNavButton) so the
+   control doesn't appear and disappear between cards; when there is no pin it
+   is visibly inert and SAYS SO, rather than vanishing. */
+.btn.maps {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  flex: 0 0 auto; min-width: 118px;
+}
+.btn.maps .nolabel { font-weight: 800; font-size: 13px; }
+.btn.maps.disabled {
+  background: var(--surface-2); color: var(--text-3);
+  border-color: var(--line); opacity: 1; cursor: default;
+}
+.btn.maps.disabled:active { transform: none; }
+.btn.maps.disabled .nolabel { font-weight: 700; }
+
 .status {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase;

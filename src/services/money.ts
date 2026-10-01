@@ -71,6 +71,10 @@ export interface Earnings {
   earned: number; paid: number; owed: number;
   delivered: number; active: number; declined: number; cancelled: number;
   avg_per_job: number; total_value: number; commission_total: number;
+  /** DELIVERED-only cash summary for the rider's remittance to the merchant. */
+  remit: {
+    collected: number; fees: number; payout: number; to_merchant: number; jobs: number;
+  };
 }
 
 function timeBounds(from?: string, to?: string): { from: string | null; to: string | null } {
@@ -119,6 +123,28 @@ export async function riderEarnings(riderId: number, from?: string, to?: string)
        AND ($3::timestamptz IS NULL OR created_at < $3)`,
     [riderId, b.from, b.to],
   );
+  // What the rider must HAND OVER to the merchant, DELIVERED-only.
+  //
+  // commission_amount is written on the booking at CREATE time, so summing it
+  // over non-cancelled rows would bill the rider for jobs they have not
+  // delivered yet. Cash only changes hands on delivery, so this is scoped to
+  // status = 'DELIVERED' — the same set the ACCRUED ledger rows come from.
+  //
+  // The identity holds exactly, because it is all one split:
+  //   collected = delivery_fee + rider_payout + remitted
+  // which is what makes this safe to put in front of a rider as a number to
+  // hand in at the depot.
+  const remitRow = await q1<any>(
+    `SELECT coalesce(sum(total), 0) AS collected,
+            coalesce(sum(delivery_fee), 0) AS fees,
+            coalesce(sum(rider_payout), 0) AS payout,
+            coalesce(sum(commission_amount), 0) AS remitted
+     FROM bk_bookings
+     WHERE assigned_rider_id = $1 AND status = 'DELIVERED' AND archived_at IS NULL
+       AND ($2::timestamptz IS NULL OR created_at >= $2)
+       AND ($3::timestamptz IS NULL OR created_at < $3)`,
+    [riderId, b.from, b.to],
+  );
   const earned = Number(earnedRow?.earned ?? 0);
   const paid = Number(paidRow?.paid ?? 0);
   const delivered = Number(earnedRow?.delivered ?? 0);
@@ -130,6 +156,14 @@ export async function riderEarnings(riderId: number, from?: string, to?: string)
     avg_per_job: delivered > 0 ? Math.round(earned / delivered) : 0,
     total_value: Number(valueRow?.total_value ?? 0),
     commission_total: Number(valueRow?.commission_total ?? 0),
+    // rider remittance summary (§ rider history)
+    remit: {
+      collected: Number(remitRow?.collected ?? 0),
+      fees: Number(remitRow?.fees ?? 0),
+      payout: Number(remitRow?.payout ?? 0),
+      to_merchant: Number(remitRow?.remitted ?? 0),
+      jobs: delivered,
+    },
   };
 }
 
