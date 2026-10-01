@@ -14,9 +14,11 @@ const { execFileSync, execSync } = require('child_process');
 
 const REPO = process.env.DOCKER_REPO || 'martincajurao/booking';
 
-function run(cmd, args, opts = {}) {
+function run(cmd, args) {
   process.stdout.write(`\n> ${cmd} ${args.join(' ')}\n`);
-  return execFileSync(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32', ...opts });
+  // No `shell: true` — docker.exe resolves directly, and letting Node concatenate
+  // args into a shell string is both noisy (DEP0190) and needless injection risk.
+  return execFileSync(cmd, args, { stdio: 'inherit' });
 }
 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
