@@ -4,10 +4,12 @@
  * The API is NEVER cached: a stale board or a stale money figure is worse than
  * an honest "you are offline". Only the app shell is cached.
  */
-// Bump the version whenever a shell file changes, or returning clients keep
-// serving the old style.css / app.js from cache (the shell is cache-first).
-// v5: light theme tokens, offline banner, nav request badge, outbox.
-const CACHE = 'postre-booking-v5';
+// Shell assets use STALE-WHILE-REVALIDATE (see the fetch handler below), so the
+// cache version is no longer something every code change has to remember to
+// bump. It is kept only to force a clean slate when the caching STRATEGY
+// changes — which is what v6 does.
+// v6: shell is stale-while-revalidate instead of cache-first.
+const CACHE = 'postre-booking-v6';
 const SHELL = [
   '/',
   '/index.html',
@@ -55,14 +57,33 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Shell assets: STALE-WHILE-REVALIDATE.
+  //
+  // This used to be plain cache-first, which meant the cached copy of app.js
+  // was returned FOREVER unless someone remembered to bump the cache name by
+  // hand. Anything installed during development kept running old JavaScript
+  // against a new document — the classic "works on my desktop, broken on my
+  // phone" report. Relying on a manual bump for every commit is a trap that
+  // gets sprung exactly as often as it is written down here.
+  //
+  // Now: serve the cached copy instantly (fast paint, works offline) and
+  // refresh it in the background, so the NEXT load is current. A rider on a
+  // patchy connection never waits on the network for the shell.
   event.respondWith(
-    caches.match(req).then((hit) => hit || fetch(req).then((res) => {
-      if (res && res.status === 200 && res.type === 'basic') {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => undefined);
-      }
-      return res;
-    }).catch(() => hit)),
+    caches.open(CACHE).then((cache) =>
+      cache.match(req).then((hit) => {
+        const network = fetch(req)
+          .then((res) => {
+            if (res && res.status === 200 && res.type === 'basic') {
+              cache.put(req, res.clone()).catch(() => undefined);
+            }
+            return res;
+          })
+          .catch(() => null);
+        // A cached copy wins immediately; otherwise we wait on the network.
+        return hit || network.then((res) => res || Response.error());
+      }),
+    ),
   );
 });
 
