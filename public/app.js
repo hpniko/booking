@@ -74,6 +74,7 @@ const store = {
   online: new Set(),   // online rider ids (from presence events)
   lastChatId: 0,
   sound: localStorage.getItem('bk_sound') !== '0',
+  notify: loadNotifyPrefs(),   // per-device: chatSound / chatBadge / jobSound
   theme: localStorage.getItem('bk_theme') || 'dark',   // dark | light | system
 
   instanceId: localStorage.getItem('bk_instance') || (() => {
@@ -259,6 +260,100 @@ function watchSystemTheme() {
   else if (themeMedia.addListener) themeMedia.addListener(onChange);
 }
 
+// ── per-device notification preferences (BOTH roles get these) ────────────────
+// Deliberately local, not bk_settings: this is about THIS phone in THIS pocket.
+// A rider who silences chat at the depot should not silence it at home, and the
+// manager's own device must not be governed by a store-wide switch.
+const NOTIFY_KEY = 'bk_notify';
+const NOTIFY_DEFAULTS = { chatSound: true, chatBadge: true, jobSound: true };
+
+function loadNotifyPrefs() {
+  try {
+    return Object.assign({}, NOTIFY_DEFAULTS, JSON.parse(localStorage.getItem(NOTIFY_KEY) || '{}'));
+  } catch { return Object.assign({}, NOTIFY_DEFAULTS); }
+}
+
+function setNotifyPref(key, value) {
+  const prefs = loadNotifyPrefs();
+  prefs[key] = !!value;
+  try { localStorage.setItem(NOTIFY_KEY, JSON.stringify(prefs)); } catch { /* private mode */ }
+  store.notify = prefs;
+  return prefs;
+}
+
+/** Per-user read cursor, so a returning device can show a truthful badge. */
+function lastChatKey() { return `bk_lastchat_${store.profile && store.profile.id}`; }
+function readLastChatId() {
+  const v = Number(localStorage.getItem(lastChatKey()) || 0);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+function writeLastChatId(id) {
+  if (!id || !store.profile) return;
+  try { localStorage.setItem(lastChatKey(), String(id)); } catch { /* private mode */ }
+}
+
+/**
+ * Shared "Alerts" card — rendered on Manager Settings, Manager profile and the
+ * Rider profile so neither role is stuck with someone else's choices.
+ */
+function alertPrefsHtml() {
+  const n = store.notify;
+  const row = (key, label, note) => `
+    <label class="kv" style="align-items:center;cursor:pointer">
+      <span class="k">${esc(label)}${note ? `<span class="req-note" style="display:block">${esc(note)}</span>` : ''}</span>
+      <input type="checkbox" data-notify="${key}" ${n[key] ? 'checked' : ''}
+             style="width:22px;height:22px;flex:0 0 auto">
+    </label>`;
+  return `<div class="card tight">
+    ${row('chatSound', 'Sound when someone chats', 'Rings for every message from the team, not just bookings or @mentions')}
+    ${row('chatBadge', 'Unread badge on the Chat tab', 'Off = no count on the tab. Messages still appear when you open Chat')}
+    ${row('jobSound', 'Sound when a new job arrives', 'An unassigned booking hitting the board')}
+    <div class="range-note">Saved on this device only. Your teammate’s settings are unaffected.</div>
+  </div>`;
+}
+
+function bindAlertPrefs(el) {
+  $$('[data-notify]', el).forEach((c) => {
+    c.onchange = () => {
+      const key = c.getAttribute('data-notify');
+      const prefs = setNotifyPref(key, c.checked);
+      if (c.checked && key === 'chatSound') chime('ok');   // audible confirmation
+      toast(c.checked ? 'Alerts on' : 'Alerts off', 'ok');
+      paintUnread();
+      // Re-evaluate immediately: un-muting the badge should reveal a real count.
+      if (key === 'chatBadge') refreshChatUnread();
+      void prefs;
+    };
+  });
+}
+
+/**
+ * Seed the Chat badge on login. Without this the badge only ever counts messages
+ * that arrived over a LIVE SSE connection, so anyone who closed the app (or whose
+ * connection dropped) came back to a badge of 0 and never knew they had missed
+ * something.
+ */
+async function refreshChatUnread() {
+  if (!store.token || !store.profile) return;
+  try {
+    if (!readLastChatId()) {
+      // First time on this device: establish a baseline WITHOUT a badge spike,
+      // otherwise a new user would see the entire chat history as "unread".
+      const rows = await api('/api/chat/messages?limit=1');
+      const last = rows.length ? Number(rows[rows.length - 1].id) || 0 : 0;
+      store.lastChatId = last;
+      writeLastChatId(last);
+      if (store.unread !== 0) { store.unread = 0; paintUnread(); }
+      return;
+    }
+    const out = await api(`/api/chat/unread?after_id=${readLastChatId()}`);
+    const n = Number(out && out.count) || 0;
+    store.unread = store.notify.chatBadge ? n : 0;
+    if (out && out.last_id) { store.lastChatId = Math.max(store.lastChatId, Number(out.last_id) || 0); }
+    paintUnread();
+  } catch { /* the badge is best-effort; never block a screen on it */ }
+}
+
 function toast(msg, kind = '') {
   const root = $('#toast-root');
   if (!root) return;
@@ -271,7 +366,12 @@ function toast(msg, kind = '') {
 }
 
 function haptic(pattern = 10) {
-  try { if (navigator.vibrate) navigator.vibrate(pattern); } catch { /* unsupported */ }
+  // The Vibration toggle writes bk_haptic; honour it here so "silence" really
+  // is silent on a phone resting on a table.
+  try {
+    if (localStorage.getItem('bk_haptic') === '0') return;
+    if (navigator.vibrate) navigator.vibrate(pattern);
+  } catch { /* unsupported */ }
 }
 
 let audioCtx = null;
@@ -557,6 +657,7 @@ function connectSSE() {
     if (isReconnect) {
       refreshCurrent().catch(() => {});
       refreshPendingReqs();
+      refreshChatUnread();     // chat events were lost during the drop
       if (store.isRider) fire(heartbeatOnce());
     }
   };
@@ -630,12 +731,21 @@ function liveApply(scope, detail) {
     if (currentView.name === 'chat') {
       appendChatMessage(m);
       scrollChat(true);
-    } else {
+      return;
+    }
+    // Don't badge or ring for your OWN message arriving back on a second device.
+    const mine = store.profile && Number(m.sender_id) === Number(store.profile.id);
+    const system = m.kind === 'SYSTEM';
+    if (mine || system) return;
+
+    // A new message from a teammate: badge it (if the user wants that) and make
+    // a noise. Previously only BOOKING cards and @mentions rang, so ordinary
+    // rider-to-rider chatter was silent — riders had no idea anyone replied.
+    if (store.notify.chatBadge) {
       store.unread += 1;
       paintUnread();
-      const mentioned = (m.mentioned_ids || []).includes(store.profile && store.profile.id);
-      if (m.kind === 'BOOKING' || mentioned) { chime('newjob'); haptic([200, 100, 200]); }
     }
+    if (store.notify.chatSound) { chime('newjob'); haptic([200, 100, 200]); }
     return;
   }
 
@@ -643,7 +753,7 @@ function liveApply(scope, detail) {
 
   // bookings / requests / riders / day / release → patch the CURRENT view only
   if (scope === 'bookings' && (detail.status === 'PENDING' || (detail.booking && detail.booking.status === 'PENDING'))) {
-    chime('newjob'); haptic([200, 100, 200]);
+    if (store.notify.jobSound) { chime('newjob'); haptic([200, 100, 200]); }
     if (!store.isManager) toast('A new job is on the board');
   }
   if (scope === 'day') { toast('Dispatch day changed'); }
@@ -2129,6 +2239,9 @@ function chatView(tabKey) {
       }
       store.unread = 0;
       paintUnread();
+      // Reading the room advances this device's cursor, so the badge stays 0
+      // until someone actually says something new.
+      writeLastChatId(store.lastChatId);
       scrollChat(true);
 
       api('/api/chat/online').then((list) => {
@@ -2486,6 +2599,8 @@ views['manager/settings'] = {
         </div>
       </div>`)}
 
+      ${section('Alerts', alertPrefsHtml())}
+
       ${section('Display', `<div class="card tight">
         <label class="kv" style="align-items:center;cursor:pointer">
           <span class="k">Sound on this device</span>
@@ -2568,6 +2683,7 @@ views['manager/settings'] = {
       if (store.sound) chime('ok');
       toast(store.sound ? 'Sound on' : 'Sound off', 'ok');
     };
+    bindAlertPrefs(el);
     $('#check-update', el).onclick = () => fire(checkForUpdate(true));
     $$('[data-theme-set]', el).forEach((b) => {
       b.onclick = () => {
@@ -2652,6 +2768,8 @@ views['manager/profile'] = {
         </label>
       </div>`)}
 
+      ${section('Alerts', alertPrefsHtml())}
+
       ${section('About', `<div class="card tight">
         <div class="kv"><span class="k">App version</span><span class="v">${esc(store.config.version || '—')}</span></div>
         <div class="kv"><span class="k">Server</span><span class="v" id="health-line">checking…</span></div>
@@ -2678,6 +2796,7 @@ views['manager/profile'] = {
       localStorage.setItem('bk_haptic', e.target.checked ? '1' : '0');
       if (e.target.checked) haptic([10]);
     };
+    bindAlertPrefs(el);
     $('#pf-logout', el).onclick = () => logout();
 
     fetch('/health').then((r) => r.json()).then((h) => {
@@ -3248,6 +3367,8 @@ views['rider/profile'] = {
         </div>
       </div>`)}
 
+      ${section('Alerts', alertPrefsHtml())}
+
       ${section('About', `<div class="card tight">
         <div class="kv"><span class="k">App version</span><span class="v">${esc(store.config.version || '—')}</span></div>
         <div class="kv"><span class="k">Store</span><span class="v">${esc(store.config.store_label || '—')}</span></div>
@@ -3267,6 +3388,7 @@ views['rider/profile'] = {
       store.sound = e.target.checked;
       localStorage.setItem('bk_sound', store.sound ? '1' : '0');
     };
+    bindAlertPrefs(el);
     $('#check-update', el).onclick = () => fire(checkForUpdate(true));
     $$('[data-theme-set]', el).forEach((b) => {
       b.onclick = () => {
@@ -3345,6 +3467,7 @@ async function afterAuth() {
   startHeartbeat();
   paintOffline();
   refreshPendingReqs();
+  refreshChatUnread();     // badge the messages missed while this device was away
   if (store.isRider) flushOutbox();   // anything queued while offline goes out now
   const loc = parseHash();
   if (!loc || loc.role !== store.role) {

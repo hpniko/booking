@@ -45,7 +45,7 @@ chatRouter.get('/messages', requireAuth, async (req, res) => {
 });
 
 chatRouter.get('/unread', requireAuth, async (req, res) => {
-  try { res.json(await unreadCount(Number(req.query.after_id) || 0)); }
+  try { res.json(await unreadCount(Number(req.query.after_id) || 0, req.user!.id)); }
   catch (err: any) { handle(err, res); }
 });
 

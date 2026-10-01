@@ -172,10 +172,25 @@ export async function softDeleteMessage(id: number, actor: ChatSender): Promise<
   return out;
 }
 
-export async function unreadCount(afterId: number): Promise<{ count: number; last_id: number }> {
+/**
+ * Unread badge count for the Chat tab.
+ *
+ * Counts only messages from OTHER people: never the caller's own messages (they
+ * would badge you for talking to yourself, e.g. from a second device) and never
+ * SYSTEM lines (day opened, commission changed — those are not someone
+ * chatting). last_id stays the global maximum so the client can advance its
+ * read cursor even when everything new was filtered out.
+ */
+export async function unreadCount(afterId: number, userId?: number | null): Promise<{ count: number; last_id: number }> {
   const row = await q1<any>(
-    'SELECT count(*) FILTER (WHERE id > $1)::int AS count, coalesce(max(id), 0)::int AS last_id FROM bk_chat_messages',
-    [afterId],
+    `SELECT count(*) FILTER (
+        WHERE id > $1
+          AND kind <> 'SYSTEM'
+          AND ($2::int IS NULL OR sender_id <> $2)
+      )::int AS count,
+            coalesce(max(id), 0)::int AS last_id
+     FROM bk_chat_messages`,
+    [afterId, userId ?? null],
   );
   return { count: Number(row?.count ?? 0), last_id: Number(row?.last_id ?? 0) };
 }
