@@ -1,18 +1,18 @@
 /**
- * Postre Booking SPA — vanilla JS, hash routing, no framework, no build step (§10).
+ * Postre Booking SPA â€” vanilla JS, hash routing, no framework, no build step (Â§10).
  *
  * Money is SERVER-DRIVEN: the client only DISPLAYS commission_amount / rider_payout
- * integers the API returned. It never re-derives a percentage (§6.7, §10.3).
+ * integers the API returned. It never re-derives a percentage (Â§6.7, Â§10.3).
  */
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // 1. tiny helpers
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-/** Every interpolated field goes through esc() — chat bodies included (§6.11.5). */
+/** Every interpolated field goes through esc() â€” chat bodies included (Â§6.11.5). */
 function esc(v) {
   return String(v == null ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -28,7 +28,7 @@ function h(html) {
 
 /** Peso rendering: the symbol comes from /config, the number from the server. */
 function peso(n) {
-  const sym = (store.config && store.config.currency) || '₱';
+  const sym = (store.config && store.config.currency) || 'â‚±';
   const v = Math.round(Number(n || 0));
   return sym + v.toLocaleString('en-PH', { maximumFractionDigits: 0 });
 }
@@ -57,36 +57,123 @@ function initials(name) {
   if (!parts.length) return '?';
   return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 2. store — JWT + cached state
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 2. store â€” JWT + cached state
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+/**
+ * Per-device notification preferences (BOTH roles get these).
+ *
+ * Deliberately local, not bk_settings: this is about THIS phone in THIS pocket.
+ * A rider who silences chat at the depot should not silence it at home, and the
+ * manager's own device must not be governed by a store-wide switch.
+ *
+ * These two constants MUST be initialised before `store` is built below,
+ * because the store calls loadNotifyPrefs(). `const` lives in the temporal dead
+ * zone until its declaration is evaluated, so declaring them further down the
+ * file threw "Cannot access 'NOTIFY_KEY' before initialization" the moment the
+ * app booted — app.js aborted at module scope and the splash logo spun forever.
+ * Keeping them here, above their first use, is what makes that impossible.
+ */
+const NOTIFY_KEY = 'bk_notify';
+const NOTIFY_DEFAULTS = { chatSound: true, chatBadge: true, jobSound: true };
+
+/**
+ * localStorage can THROW, not just return null.
+ *
+ * Android Chrome throws SecurityError when the user has blocked cookies and
+ * site data (and several in-app browsers do the same). Because the store below
+ * reads storage at MODULE SCOPE, one throw there aborts app.js before init()
+ * ever runs â€” the splash logo spins forever and the console shows a message
+ * nobody on a delivery bike is going to read. It looked like a desktop-only
+ * success and a phone-only failure, which is exactly the shape of this bug.
+ *
+ * Everything now goes through these helpers: unreadable storage degrades to
+ * "not remembered" instead of a dead screen, and the app keeps working for the
+ * rest of the session from memory.
+ */
+let storageBlocked = false;
+function lsGet(key) {
+  try { return localStorage.getItem(key); }
+  catch { storageBlocked = true; return null; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { storageBlocked = true; }
+}
+function lsDel(key) {
+  try { localStorage.removeItem(key); } catch { storageBlocked = true; }
+}
+/** JSON read that can never throw â€” malformed or absent both give `fallback`. */
+function lsJSON(key, fallback) {
+  const raw = lsGet(key);
+  if (raw == null || raw === '') return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed == null ? fallback : parsed;
+  } catch { return fallback; }
+}
+
+/**
+ * Never leave someone staring at a spinner.
+ *
+ * A rider in the field cannot open devtools, so an error they cannot SEE is an
+ * error we never hear about either. Anything that escapes during boot, and any
+ * boot that has not resolved within BOOT_TIMEOUT_MS, replaces the splash with
+ * the actual reason plus a retry — instead of an endless spinner that looks
+ * identical to "still loading" forever.
+ */
+const BOOT_TIMEOUT_MS = 20000;
+let bootSettled = false;
+
+function fatalScreen(title, detail) {
+  const splash = document.getElementById('splash');
+  if (!splash) return;
+  splash.innerHTML = `
+    <div class="splash-logo">⚠️</div>
+    <div class="splash-name">${esc(title)}</div>
+    <p style="max-width:340px;text-align:center;color:var(--text-2);font-size:14px;line-height:1.5">${esc(detail)}</p>
+    ${storageBlocked ? '<p style="font-size:12.5px;color:var(--amber);max-width:340px;text-align:center">This browser is blocking site data, so the app cannot stay signed in. Allow cookies for this site in Chrome settings, then retry.</p>' : ''}
+    <button class="btn primary" id="fatal-retry" style="margin-top:10px">Try again</button>`;
+  const retry = document.getElementById('fatal-retry');
+  if (retry) retry.onclick = () => location.reload();
+}
+
+window.addEventListener('error', (e) => {
+  if (bootSettled) return;              // after boot the router reports its own errors
+  fatalScreen('Something went wrong', (e && e.message) || 'The app could not start.');
+});
+window.addEventListener('unhandledrejection', (e) => {
+  if (bootSettled) return;
+  const r = e && e.reason;
+  fatalScreen('Something went wrong', (r && r.message) || String(r) || 'The app could not start.');
+});
+
 const store = {
-  token: localStorage.getItem('bk_token') || null,
-  refreshToken: localStorage.getItem('bk_refresh') || null,
-  profile: JSON.parse(localStorage.getItem('bk_profile') || 'null'),
+  token: lsGet('bk_token') || null,
+  refreshToken: lsGet('bk_refresh') || null,
+  profile: lsJSON('bk_profile', null),
   config: {},
   dash: null,          // manager dashboard cache
   home: null,          // rider home cache
-  bkIndex: {},         // id → booking, filled by every list paint
+  bkIndex: {},         // id â†’ booking, filled by every list paint
   listFilter: null,    // one-shot filter for #/manager/bookings
   unread: 0,
   pendingReqs: 0,   // manager: requests awaiting approval (nav badge)
   online: new Set(),   // online rider ids (from presence events)
   lastChatId: 0,
-  sound: localStorage.getItem('bk_sound') !== '0',
+  sound: lsGet('bk_sound') !== '0',
   notify: loadNotifyPrefs(),   // per-device: chatSound / chatBadge / jobSound
-  theme: localStorage.getItem('bk_theme') || 'dark',   // dark | light | system
+  theme: lsGet('bk_theme') || 'dark',   // dark | light | system
 
-  instanceId: localStorage.getItem('bk_instance') || (() => {
+  instanceId: lsGet('bk_instance') || (() => {
     const id = 'inst-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    localStorage.setItem('bk_instance', id);
+    lsSet('bk_instance', id);
     return id;
   })(),
 
   save() {
-    localStorage.setItem('bk_token', this.token || '');
-    localStorage.setItem('bk_refresh', this.refreshToken || '');
-    localStorage.setItem('bk_profile', JSON.stringify(this.profile));
+    lsSet('bk_token', this.token || '');
+    lsSet('bk_refresh', this.refreshToken || '');
+    lsSet('bk_profile', JSON.stringify(this.profile));
   },
   clear() {
     this.token = this.refreshToken = null;
@@ -95,9 +182,9 @@ const store = {
     this.unread = 0;
     this.pendingReqs = 0;
     this.lastChatId = 0;
-    localStorage.removeItem('bk_token');
-    localStorage.removeItem('bk_refresh');
-    localStorage.removeItem('bk_profile');
+    lsDel('bk_token');
+    lsDel('bk_refresh');
+    lsDel('bk_profile');
   },
   get role() { return this.profile && this.profile.role ? this.profile.role : null; },
   get isManager() { return this.role === 'MANAGER'; },
@@ -106,9 +193,9 @@ const store = {
   get name() { return (this.profile && this.profile.full_name) || ''; },
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 3. api() — one funnel, refresh-once-on-401
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 3. api() â€” one funnel, refresh-once-on-401
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 async function api(path, opts = {}) {
   const url = path.startsWith('/api') ? path : `/api${path}`;
   const send = () => fetch(url, {
@@ -127,7 +214,7 @@ async function api(path, opts = {}) {
   }
   if (res.status === 401 && store.profile) {
     logout(true);
-    throw new Error('Your session expired — please sign in again');
+    throw new Error('Your session expired â€” please sign in again');
   }
   const data = (res.headers.get('content-type') || '').includes('json')
     ? await res.json().catch(() => ({}))
@@ -156,29 +243,25 @@ async function tryRefresh() {
     return true;
   } catch { return false; }
 }
-// ── offline outbox — the rider lifecycle must not be lost on flaky mobile data ──
+// â”€â”€ offline outbox â€” the rider lifecycle must not be lost on flaky mobile data â”€â”€
 // accept / pickup / deliver are the three actions a rider cannot afford to lose
 // mid-delivery, so they are queued and replayed instead of being hard-refused.
 const OUTBOX_KEY = 'bk_outbox';
 
 function readOutbox() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]');
-    return Array.isArray(raw) ? raw.filter((x) => x && x.id && x.act) : [];
-  } catch { return []; }
+  const raw = lsJSON(OUTBOX_KEY, []);
+  return Array.isArray(raw) ? raw.filter((x) => x && x.id && x.act) : [];
 }
 
 function writeOutbox(list) {
-  try {
-    localStorage.setItem(OUTBOX_KEY, JSON.stringify(list.slice(-25)));
-  } catch { /* quota — the queue is best-effort, never fatal */ }
+  lsSet(OUTBOX_KEY, JSON.stringify(list.slice(-25)));
 }
 
 function outboxHas(id) {
   return readOutbox().some((x) => Number(x.id) === Number(id));
 }
 
-/** Send one queued action. A 409 means the world already moved on → drop it. */
+/** Send one queued action. A 409 means the world already moved on â†’ drop it. */
 async function flushOutbox() {
   const list = readOutbox();
   if (!list.length || !navigator.onLine) return 0;
@@ -189,9 +272,9 @@ async function flushOutbox() {
       await api(`/api/rider/jobs/${item.id}/${item.act}`, { method: 'POST' });
       sent++;
     } catch (err) {
-      // 4xx = stale (already applied / no longer mine) → discard, never retry.
+      // 4xx = stale (already applied / no longer mine) â†’ discard, never retry.
       if (err && err.status >= 400 && err.status < 500) continue;
-      remaining.push(item);                                 // network / 5xx → keep
+      remaining.push(item);                                 // network / 5xx â†’ keep
     }
   }
   writeOutbox(remaining);
@@ -221,12 +304,12 @@ function paintOutbox() {
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 4. feedback — toast / haptics / chime (§10.6.5). Three channels for one event.
-// ═══════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
-// 3.5. theme — dark / light / system (§6.8)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 4. feedback â€” toast / haptics / chime (Â§10.6.5). Three channels for one event.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 3.5. theme â€” dark / light / system (Â§6.8)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const THEME_KEY = 'bk_theme';
 let themeMedia = null;
 
@@ -247,7 +330,7 @@ function applyTheme() {
 
 function setTheme(pref) {
   store.theme = pref;
-  try { localStorage.setItem(THEME_KEY, pref); } catch { /* private mode */ }
+  lsSet(THEME_KEY, pref);
   applyTheme();
 }
 
@@ -260,23 +343,20 @@ function watchSystemTheme() {
   else if (themeMedia.addListener) themeMedia.addListener(onChange);
 }
 
-// ── per-device notification preferences (BOTH roles get these) ────────────────
-// Deliberately local, not bk_settings: this is about THIS phone in THIS pocket.
-// A rider who silences chat at the depot should not silence it at home, and the
-// manager's own device must not be governed by a store-wide switch.
-const NOTIFY_KEY = 'bk_notify';
-const NOTIFY_DEFAULTS = { chatSound: true, chatBadge: true, jobSound: true };
-
+// â”€â”€ per-device notification preferences (BOTH roles get these) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// NOTE: NOTIFY_KEY / NOTIFY_DEFAULTS are declared near the top of this file,
+// ABOVE `store`, because the store calls loadNotifyPrefs(). See the comment
+// there — declaring them down here put them in the temporal dead zone and the
+// app crashed on boot with a splash that spun forever.
 function loadNotifyPrefs() {
-  try {
-    return Object.assign({}, NOTIFY_DEFAULTS, JSON.parse(localStorage.getItem(NOTIFY_KEY) || '{}'));
-  } catch { return Object.assign({}, NOTIFY_DEFAULTS); }
+  const saved = lsJSON(NOTIFY_KEY, {});
+  return Object.assign({}, NOTIFY_DEFAULTS, saved && typeof saved === 'object' ? saved : {});
 }
 
 function setNotifyPref(key, value) {
   const prefs = loadNotifyPrefs();
   prefs[key] = !!value;
-  try { localStorage.setItem(NOTIFY_KEY, JSON.stringify(prefs)); } catch { /* private mode */ }
+  lsSet(NOTIFY_KEY, JSON.stringify(prefs));
   store.notify = prefs;
   return prefs;
 }
@@ -284,16 +364,16 @@ function setNotifyPref(key, value) {
 /** Per-user read cursor, so a returning device can show a truthful badge. */
 function lastChatKey() { return `bk_lastchat_${store.profile && store.profile.id}`; }
 function readLastChatId() {
-  const v = Number(localStorage.getItem(lastChatKey()) || 0);
+  const v = Number(lsGet(lastChatKey()) || 0);
   return Number.isFinite(v) && v > 0 ? v : 0;
 }
 function writeLastChatId(id) {
   if (!id || !store.profile) return;
-  try { localStorage.setItem(lastChatKey(), String(id)); } catch { /* private mode */ }
+  lsSet(lastChatKey(), String(id));
 }
 
 /**
- * Shared "Alerts" card — rendered on Manager Settings, Manager profile and the
+ * Shared "Alerts" card â€” rendered on Manager Settings, Manager profile and the
  * Rider profile so neither role is stuck with someone else's choices.
  */
 function alertPrefsHtml() {
@@ -308,7 +388,7 @@ function alertPrefsHtml() {
     ${row('chatSound', 'Sound when someone chats', 'Rings for every message from the team, not just bookings or @mentions')}
     ${row('chatBadge', 'Unread badge on the Chat tab', 'Off = no count on the tab. Messages still appear when you open Chat')}
     ${row('jobSound', 'Sound when a new job arrives', 'An unassigned booking hitting the board')}
-    <div class="range-note">Saved on this device only. Your teammate’s settings are unaffected.</div>
+    <div class="range-note">Saved on this device only. Your teammateâ€™s settings are unaffected.</div>
   </div>`;
 }
 
@@ -369,7 +449,7 @@ function haptic(pattern = 10) {
   // The Vibration toggle writes bk_haptic; honour it here so "silence" really
   // is silent on a phone resting on a table.
   try {
-    if (localStorage.getItem('bk_haptic') === '0') return;
+    if (lsGet('bk_haptic') === '0') return;
     if (navigator.vibrate) navigator.vibrate(pattern);
   } catch { /* unsupported */ }
 }
@@ -379,7 +459,7 @@ function unlockAudio() {
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
-  } catch { /* no WebAudio — the toast and haptic still fire */ }
+  } catch { /* no WebAudio â€” the toast and haptic still fire */ }
 }
 
 function chime(kind = 'ok') {
@@ -397,12 +477,12 @@ function chime(kind = 'ok') {
     g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.45);
     o.start();
     o.stop(audioCtx.currentTime + 0.47);
-  } catch { /* audio blocked until first gesture — fine */ }
+  } catch { /* audio blocked until first gesture â€” fine */ }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 5. bottom sheets — never a centred modal (§10.6.2)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 5. bottom sheets â€” never a centred modal (Â§10.6.2)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 let sheetStack = [];
 
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
@@ -421,7 +501,7 @@ function openSheet(html, opts = {}) {
   backdrop.appendChild(sheet);
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop && !opts.locked) closeSheet(); });
 
-  // Keyboard/switch accessibility (§10.6.8): Tab cycles INSIDE the sheet, Escape
+  // Keyboard/switch accessibility (Â§10.6.8): Tab cycles INSIDE the sheet, Escape
   // closes it, and focus returns to whatever opened it.
   const onKey = (e) => {
     if (sheetStack[sheetStack.length - 1] !== backdrop) return;
@@ -502,19 +582,19 @@ function promptSheet(title, { label = '', value = '', placeholder = '', required
     };
   });
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 6. status metadata — glyph + colour + word, never colour alone (§10.6.4)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 6. status metadata â€” glyph + colour + word, never colour alone (Â§10.6.4)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const STATUS = {
-  PENDING: { group: 'open', label: 'Open', glyph: '⏳' },
-  ASSIGNED: { group: 'claimed', label: 'Claimed', glyph: '📩' },
-  ACCEPTED: { group: 'ongoing', label: 'On the way', glyph: '🚗' },
-  PICKED_UP: { group: 'ongoing', label: 'Picked up', glyph: '📦' },
-  DELIVERED: { group: 'closed', label: 'Delivered', glyph: '✅' },
-  CANCELLED: { group: 'cancelled', label: 'Cancelled', glyph: '❌' },
+  PENDING: { group: 'open', label: 'Open', glyph: 'â³' },
+  ASSIGNED: { group: 'claimed', label: 'Claimed', glyph: 'ðŸ“©' },
+  ACCEPTED: { group: 'ongoing', label: 'On the way', glyph: 'ðŸš—' },
+  PICKED_UP: { group: 'ongoing', label: 'Picked up', glyph: 'ðŸ“¦' },
+  DELIVERED: { group: 'closed', label: 'Delivered', glyph: 'âœ…' },
+  CANCELLED: { group: 'cancelled', label: 'Cancelled', glyph: 'âŒ' },
 };
 function statusMeta(s) {
-  return STATUS[s] || { group: 'closed', label: String(s || '—'), glyph: '•' };
+  return STATUS[s] || { group: 'closed', label: String(s || 'â€”'), glyph: 'â€¢' };
 }
 function statusPill(s) {
   const m = statusMeta(s);
@@ -529,9 +609,9 @@ function riderWarn(b) {
   return b.live_group === 'ONGOING' && b.rider_online === false;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 7. booking card — one primary action per card (§10.6.2)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 7. booking card â€” one primary action per card (Â§10.6.2)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function bkCard(b, opts = {}) {
   const g = groupClass(b);
   const customer = b.customer_name ? esc(b.customer_name) : 'Walk-in / unnamed';
@@ -541,16 +621,16 @@ function bkCard(b, opts = {}) {
          <span data-rider-dot="${b.assigned_rider_id}"
                class="${b.rider_online === false ? 'dot-offline' : 'dot-online'}"></span>
          ${esc(b.rider_name || 'Rider')}
-         ${b.priority === 'HIGH' ? ' · <strong>HIGH</strong>' : ''}
+         ${b.priority === 'HIGH' ? ' Â· <strong>HIGH</strong>' : ''}
        </div>`
     : (opts.showOpenHint ? `<div class="rider-line"><span class="dot-offline"></span>Unassigned</div>` : '');
   const warn = riderWarn(b)
-    ? `<div class="warn-line">⚠ Ongoing · the rider's phone has gone offline</div>` : '';
+    ? `<div class="warn-line">âš  Ongoing Â· the rider's phone has gone offline</div>` : '';
   const money = b.total != null
     ? `<div class="bk-money">${peso(b.total)}</div>`
-    : '<div class="bk-money" style="color:var(--text-3)">—</div>';
-  // "You ₱X" reads as the viewer's own money, which is wrong on the manager
-  // board — there it is the RIDER's payout. Name it for whoever is looking.
+    : '<div class="bk-money" style="color:var(--text-3)">â€”</div>';
+  // "You â‚±X" reads as the viewer's own money, which is wrong on the manager
+  // board â€” there it is the RIDER's payout. Name it for whoever is looking.
   const payoutLabel = store.isManager ? 'Rider' : 'You';
 
   return `
@@ -568,11 +648,11 @@ function bkCard(b, opts = {}) {
       ${riderLine}
       ${warn}
       <div class="warn-line hidden" data-queued="${b.id}" style="background:var(--blue-soft);color:var(--blue);border-color:rgba(77,163,255,.4)">
-        ⏳ Waiting to send — will go out when you reconnect
+        â³ Waiting to send â€” will go out when you reconnect
       </div>
       <div class="bk-top" style="margin-top:9px">
         ${statusPill(b.status)}
-        ${b.nav ? '<span style="font-size:12px;color:var(--text-3)">📍 pin</span>' : ''}
+        ${b.nav ? '<span style="font-size:12px;color:var(--text-3)">ðŸ“ pin</span>' : ''}
       </div>
       ${opts.actions || ''}
     </div>`;
@@ -582,9 +662,9 @@ function emptyBox(glyph, text) {
   return `<div class="empty"><span class="big">${glyph}</span>${esc(text)}</div>`;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 8. one-tap navigation (§10.6.7) — app deep-link with an https fallback
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 8. one-tap navigation (Â§10.6.7) â€” app deep-link with an https fallback
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 let navLeft = false;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') navLeft = true;
@@ -605,9 +685,9 @@ function openMaps(url) {
   haptic(10);
   window.open(url, '_blank', 'noopener');
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 9. SSE — one connect after login, native auto-retry + our own backoff (§10.4)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 9. SSE â€” one connect after login, native auto-retry + our own backoff (Â§10.4)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 let es = null;
 let esRetry = 0;
 let esTimer = null;
@@ -624,15 +704,15 @@ function setLive(on, why) {
   const chip = $('#live-chip');
   if (!chip) return;
   const mode = on ? 'live' : (why === 'connecting' ? 'connecting' : 'off');
-  if (liveState === mode) return;           // nothing changed — leave the DOM alone
+  if (liveState === mode) return;           // nothing changed â€” leave the DOM alone
   liveState = mode;
   chip.classList.toggle('off', mode === 'off');
   chip.title = mode === 'live' ? 'Live connection'
-    : mode === 'connecting' ? 'Connecting…' : 'Reconnecting…';
-  chip.innerHTML = `<i></i> ${mode === 'live' ? 'Live' : (mode === 'connecting' ? '…' : 'Off')}`;
+    : mode === 'connecting' ? 'Connectingâ€¦' : 'Reconnectingâ€¦';
+  chip.innerHTML = `<i></i> ${mode === 'live' ? 'Live' : (mode === 'connecting' ? 'â€¦' : 'Off')}`;
 }
 
-/** True once this session has had a live channel — distinguishes 1st connect from a reconnect. */
+/** True once this session has had a live channel â€” distinguishes 1st connect from a reconnect. */
 let esEverConnected = false;
 
 function connectSSE() {
@@ -652,7 +732,7 @@ function connectSSE() {
     esRetry = 0;
     setLive(true);
     // A dropped channel (Render spin-down, tunnel, phone sleep) never delivers
-    // the events emitted while it was down — so a new job could sit unseen on
+    // the events emitted while it was down â€” so a new job could sit unseen on
     // the board. Re-read state on every reconnect instead of trusting the gap.
     if (isReconnect) {
       refreshCurrent().catch(() => {});
@@ -670,7 +750,7 @@ function connectSSE() {
     if (scope) liveApply(scope, detail);
   });
   es.addEventListener('error', () => {
-    if (es && es.readyState === 2 /* CLOSED — fatal, we must reconnect ourselves */) {
+    if (es && es.readyState === 2 /* CLOSED â€” fatal, we must reconnect ourselves */) {
       setLive(false, 'reconnecting');
       try { es.close(); } catch { /* noop */ }
       es = null;
@@ -678,7 +758,7 @@ function connectSSE() {
       esTimer = setTimeout(connectSSE, Math.min(1000 * Math.pow(2, esRetry), 20000));
     } else {
       // readyState 0/1 = the browser is ALREADY auto-reconnecting. That is not
-      // "offline" — showing the amber Off state here was the other half of the
+      // "offline" â€” showing the amber Off state here was the other half of the
       // flicker, flipping the chip green/amber on every transient blip.
       setLive(false, 'connecting');
     }
@@ -692,7 +772,7 @@ function disconnectSSE() {
   setLive(false, 'connecting');
 }
 
-/** Repaint every visible presence dot from the new set — no refetch (§10.4). */
+/** Repaint every visible presence dot from the new set â€” no refetch (Â§10.4). */
 function repaintPresence() {
   $$('[data-rider-dot]').forEach((el) => {
     const id = Number(el.getAttribute('data-rider-dot'));
@@ -740,7 +820,7 @@ function liveApply(scope, detail) {
 
     // A new message from a teammate: badge it (if the user wants that) and make
     // a noise. Previously only BOOKING cards and @mentions rang, so ordinary
-    // rider-to-rider chatter was silent — riders had no idea anyone replied.
+    // rider-to-rider chatter was silent â€” riders had no idea anyone replied.
     if (store.notify.chatBadge) {
       store.unread += 1;
       paintUnread();
@@ -751,7 +831,7 @@ function liveApply(scope, detail) {
 
   if (scope === 'session') { refreshConfig().catch(() => {}); return; }
 
-  // bookings / requests / riders / day / release → patch the CURRENT view only
+  // bookings / requests / riders / day / release â†’ patch the CURRENT view only
   if (scope === 'bookings' && (detail.status === 'PENDING' || (detail.booking && detail.booking.status === 'PENDING'))) {
     if (store.notify.jobSound) { chime('newjob'); haptic([200, 100, 200]); }
     if (!store.isManager) toast('A new job is on the board');
@@ -766,40 +846,40 @@ function scheduleRefresh() {
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => { refreshCurrent().catch(() => {}); }, 320);
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 10. navigation + hash router (§10.2, §10.3)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 10. navigation + hash router (Â§10.2, Â§10.3)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 /**
- * Bottom tab bar (mobile, max 5 by §10.6.2) / left rail (desktop).
+ * Bottom tab bar (mobile, max 5 by Â§10.6.2) / left rail (desktop).
  *
  * Items flagged `desk: true` exist ONLY in the desktop rail. The manager's
  * phone tab bar is capped at five, so New booking / Requests / History /
- * Days / Settings / Profile are reached through the "More" hub — but a PC
+ * Days / Settings / Profile are reached through the "More" hub â€” but a PC
  * rail is tall enough to show every destination at once, so there the hub
  * itself is hidden and the same destinations become real nav items.
  */
 const NAV = {
   MANAGER: [
-    { key: 'dashboard', label: 'Dashboard', icon: '🏠' },
-    { key: 'bookings', label: 'Jobs', icon: '📋' },
-    { key: 'chat', label: 'Chat', icon: '💬', badge: true },
-    { key: 'riders', label: 'Riders', icon: '🏍' },
-    { key: 'more', label: 'More', icon: '⋯', phone: true, reqBadge: true },
+    { key: 'dashboard', label: 'Dashboard', icon: 'ðŸ ' },
+    { key: 'bookings', label: 'Jobs', icon: 'ðŸ“‹' },
+    { key: 'chat', label: 'Chat', icon: 'ðŸ’¬', badge: true },
+    { key: 'riders', label: 'Riders', icon: 'ðŸ' },
+    { key: 'more', label: 'More', icon: 'â‹¯', phone: true, reqBadge: true },
     { key: '_sep', sep: true },
-    { key: 'new', label: 'New booking', icon: '＋', desk: true },
-    { key: 'requests', label: 'Requests', icon: '🔔', desk: true, reqBadge: true },
-    { key: 'history', label: 'History', icon: '🧾', desk: true },
-    { key: 'days', label: 'Dispatch days', icon: '📅', desk: true },
-    { key: 'settings', label: 'Settings', icon: '⚙️', desk: true },
-    { key: 'profile', label: 'My profile', icon: '👔', desk: true },
+    { key: 'new', label: 'New booking', icon: 'ï¼‹', desk: true },
+    { key: 'requests', label: 'Requests', icon: 'ðŸ””', desk: true, reqBadge: true },
+    { key: 'history', label: 'History', icon: 'ðŸ§¾', desk: true },
+    { key: 'days', label: 'Dispatch days', icon: 'ðŸ“…', desk: true },
+    { key: 'settings', label: 'Settings', icon: 'âš™ï¸', desk: true },
+    { key: 'profile', label: 'My profile', icon: 'ðŸ‘”', desk: true },
   ],
   RIDER: [
     // Open jobs live ON this dashboard, so the separate "Open" tab that used to
-    // duplicate them is gone — one screen, four tabs, nothing repeated.
-    { key: 'home', label: 'Dashboard', icon: '🏠' },
-    { key: 'chat', label: 'Chat', icon: '💬', center: true, badge: true },
-    { key: 'history', label: 'History', icon: '🧾' },
-    { key: 'profile', label: 'Profile', icon: '👤' },
+    // duplicate them is gone â€” one screen, four tabs, nothing repeated.
+    { key: 'home', label: 'Dashboard', icon: 'ðŸ ' },
+    { key: 'chat', label: 'Chat', icon: 'ðŸ’¬', center: true, badge: true },
+    { key: 'history', label: 'History', icon: 'ðŸ§¾' },
+    { key: 'profile', label: 'Profile', icon: 'ðŸ‘¤' },
   ],
 };
 
@@ -827,7 +907,7 @@ function paintNav(role, loc) {
     const badge = it.badge && store.unread > 0
       ? `<span class="nav-badge" data-unread>${store.unread > 99 ? '99+' : store.unread}</span>` : '';
     // A pending request blocks a rider from working, so the count rides on both
-    // the phone hub and the desktop rail item (§ flow: approvals are urgent).
+    // the phone hub and the desktop rail item (Â§ flow: approvals are urgent).
     const reqBadge = it.reqBadge && store.pendingReqs > 0
       ? `<span class="nav-badge req" data-reqbadge>${store.pendingReqs > 99 ? '99+' : store.pendingReqs}</span>` : '';
     const label = it.reqBadge && store.pendingReqs > 0
@@ -880,7 +960,7 @@ function paintReqBadge() {
   if (has) paintNav(store.role, currentView.params || {});
 }
 
-/** COUNT-only fetch — never pulls the whole queue just to draw a badge. */
+/** COUNT-only fetch â€” never pulls the whole queue just to draw a badge. */
 async function refreshPendingReqs() {
   if (!store.isManager || !store.token) return;
   try {
@@ -934,16 +1014,16 @@ async function router() {
   const el = $('#view');
   el.className = 'view' + (v.chatMode ? ' chat-mode' : '');
   el.scrollTop = 0;
-  el.innerHTML = `<div class="empty"><span class="big">🍰</span>Loading…</div>`;
+  el.innerHTML = `<div class="empty"><span class="big">ðŸ°</span>Loadingâ€¦</div>`;
   try {
     await v.mount(el, loc);
   } catch (err) {
-    el.innerHTML = emptyBox('⚠️', err.message || 'Something went wrong');
+    el.innerHTML = emptyBox('âš ï¸', err.message || 'Something went wrong');
     if (err && err.status !== 401) toast(err.message || 'Could not load', 'err');
   }
 }
 
-/** Re-run the current view's mount — SSE-driven, current view only (§10.4). */
+/** Re-run the current view's mount â€” SSE-driven, current view only (Â§10.4). */
 async function refreshCurrent() {
   if (!store.profile || !currentView.route) return;
   const v = views[currentView.route];
@@ -955,12 +1035,12 @@ async function refreshCurrent() {
 }
 
 window.addEventListener('hashchange', () => { router().catch(() => {}); });
-// ═══════════════════════════════════════════════════════════════════════════════
-// 11. action helper — every mutation: visual + haptic + audible (§10.6.5)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 11. action helper â€” every mutation: visual + haptic + audible (Â§10.6.5)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 async function run(fn, okMsg) {
   if (!navigator.onLine) {
-    toast("You're offline — this will not send", 'err');
+    toast("You're offline â€” this will not send", 'err');
     haptic([400, 200, 400]);
     throw new Error('offline');
   }
@@ -982,9 +1062,9 @@ async function run(fn, okMsg) {
 /** Fire-and-refresh without awaiting inside a click handler. */
 const fire = (p) => { p.catch(() => {}); };
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // 12. shared sheets: assign / transfer / cancel / payout
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function riderPickList(riders, selectedId, allowNone) {
   const rows = (riders || []).map((r) => `
     <button class="pick${Number(selectedId) === Number(r.id) ? ' selected' : ''}" data-pick="${r.id}">
@@ -994,7 +1074,7 @@ function riderPickList(riders, selectedId, allowNone) {
       </span>
       <span class="grow">
         <span class="nm">${esc(r.full_name)}</span>
-        <span class="sub">${r.online ? '🟢 online' : '⚪ offline'} · ${Number(r.active_jobs || 0)} active</span>
+        <span class="sub">${r.online ? 'ðŸŸ¢ online' : 'âšª offline'} Â· ${Number(r.active_jobs || 0)} active</span>
       </span>
       <span style="font-size:13px;color:var(--text-3)">${peso(r.owed || 0)} owed</span>
     </button>`).join('');
@@ -1053,7 +1133,7 @@ async function assignSheet(booking, presetTransfer) {
 }
 async function cancelSheet(booking) {
   const reason = await promptSheet(`Cancel ${booking.ref}`, {
-    label: 'Reason (required — it is written to the audit ledger)',
+    label: 'Reason (required â€” it is written to the audit ledger)',
     placeholder: 'e.g. customer cancelled the order',
   });
   if (reason == null) return;
@@ -1062,10 +1142,10 @@ async function cancelSheet(booking) {
 
 function payoutSheet(rider, owed) {
   const sheet = openSheet(`
-    <h3>Record payout — ${esc(rider.full_name)}</h3>
+    <h3>Record payout â€” ${esc(rider.full_name)}</h3>
     <div class="kv"><span class="k">Currently owed</span><span class="v">${peso(owed)}</span></div>
     <div class="field" style="margin-top:12px">
-      <span>Amount (₱)</span>
+      <span>Amount (â‚±)</span>
       <input id="po-amt" type="text" inputmode="decimal" value="${Number(owed || 0)}">
     </div>
     <div class="field">
@@ -1107,17 +1187,17 @@ function payoutSheet(rider, owed) {
 /** Manager posts a BOOKING card into the shared room so every rider sees it. */
 async function postBookingToChat(booking) {
   const note = await promptSheet(`Post ${booking.ref} to chat`, {
-    label: 'Note (optional)', required: false, placeholder: 'e.g. fast pickup, ₱50 tip',
+    label: 'Note (optional)', required: false, placeholder: 'e.g. fast pickup, â‚±50 tip',
   });
   if (note == null) return;
   fire(run(() => api('/api/chat/messages/booking', { method: 'POST', body: { booking_id: booking.id, note } }), 'Posted to chat'));
 }
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // 13. shared render bits
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 /**
  * A titled section. The body is wrapped in `.sec-body` so the desktop layer
- * (§10.6) can lay a run of booking cards out as a responsive grid without
+ * (Â§10.6) can lay a run of booking cards out as a responsive grid without
  * every call site having to add its own wrapper.
  */
 function section(title, body, right = '') {
@@ -1138,9 +1218,9 @@ function rosterStrip(riders) {
     </button>`).join('')}</div>`;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 14. MANAGER — dashboard (§10.2)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 14. MANAGER â€” dashboard (Â§10.2)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 views['manager/dashboard'] = {
   title: 'Dashboard',
   tab: 'dashboard',
@@ -1150,7 +1230,7 @@ views['manager/dashboard'] = {
     store.online = new Set((d.onlineRiders || []).map(Number));
     const live = d.live || {};
     const reqs = d.pendingRequests || [];
-    // the dashboard already returns the queue — seed the nav badge from it
+    // the dashboard already returns the queue â€” seed the nav badge from it
     if (reqs.length !== store.pendingReqs) { store.pendingReqs = reqs.length; paintReqBadge(); }
     const roster = (d.riders || []).filter((r) => Number(r.is_active) === 1);
     const day = d.day;
@@ -1167,7 +1247,7 @@ views['manager/dashboard'] = {
         <div>
           <strong>Dispatch day ${esc(day.date_ref)}</strong>
           <div style="color:var(--text-3);font-size:12.5px">
-            ${esc(day.status || 'OPEN')} · opened ${esc(timeLabel(day.opened_at))}
+            ${esc(day.status || 'OPEN')} Â· opened ${esc(timeLabel(day.opened_at))}
           </div>
         </div>
         <button class="btn small ghost" data-days>Manage</button>
@@ -1180,18 +1260,18 @@ views['manager/dashboard'] = {
         <button class="stat claimed" data-jump="claimed"><span class="n">${reqs.length}</span><span class="l">Needs approval</span></button>
       </div>
 
-      ${section(`Needs approval${reqs.length ? ` · ${reqs.length}` : ''}`, reqHtml)}
+      ${section(`Needs approval${reqs.length ? ` Â· ${reqs.length}` : ''}`, reqHtml)}
 
-      ${section(`Ongoing · ${(d.ongoing || []).length}`, (d.ongoing || []).length
+      ${section(`Ongoing Â· ${(d.ongoing || []).length}`, (d.ongoing || []).length
         ? cards(d.ongoing, (b) => `
             <div class="bk-actions">
               <button class="btn primary small" data-open="${b.id}">Open</button>
-              ${b.nav ? `<button class="btn small maps" data-nav-app="${b.id}">🗺️ Navigate</button>` : ''}
+              ${b.nav ? `<button class="btn small maps" data-nav-app="${b.id}">ðŸ—ºï¸ Navigate</button>` : ''}
               <button class="btn ghost small" data-transfer="${b.id}">Transfer</button>
             </div>`)
         : '<div class="empty">Nothing on the road right now</div>')}
 
-      ${section(`Awaiting acceptance · ${(d.claimed || []).length}`, (d.claimed || []).length
+      ${section(`Awaiting acceptance Â· ${(d.claimed || []).length}`, (d.claimed || []).length
         ? cards(d.claimed, (b) => `
             <div class="bk-actions">
               <button class="btn primary small" data-open="${b.id}">Open</button>
@@ -1199,7 +1279,7 @@ views['manager/dashboard'] = {
             </div>`)
         : '<div class="empty">No job is waiting on a rider</div>')}
 
-      ${section(`Open board · ${(d.open || []).length}`, (d.open || []).length
+      ${section(`Open board Â· ${(d.open || []).length}`, (d.open || []).length
         ? cards(d.open, (b) => `
             <div class="bk-actions">
               <button class="btn primary small" data-open="${b.id}">Open</button>
@@ -1259,9 +1339,9 @@ function wireDashboard(el, d, reqs) {
   const days = $('[data-days]', el);
   if (days) days.onclick = () => { location.hash = '#/manager/days'; };
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 15. MANAGER — full board (§10.2)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 15. MANAGER â€” full board (Â§10.2)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const BOARD_FILTERS = [
   { key: '', label: 'All live' },
   { key: 'open', label: 'Open' },
@@ -1309,8 +1389,8 @@ views['manager/bookings'] = {
               ${b.status === 'PENDING' ? `<button class="btn small" data-assign="${b.id}">Assign</button>` : ''}
             </div>`,
         })).join('')
-        : emptyBox('🔍', 'No bookings match this filter')}</div>
-      <button class="fab" id="new-bk" aria-label="New booking">＋</button>
+        : emptyBox('ðŸ”', 'No bookings match this filter')}</div>
+      <button class="fab" id="new-bk" aria-label="New booking">ï¼‹</button>
     `;
 
     $$('[data-filter]', el).forEach((c) => {
@@ -1341,16 +1421,16 @@ views['manager/bookings'] = {
     $('#new-bk', el).onclick = () => { location.hash = '#/manager/new'; };
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 16. MANAGER — booking detail sheet (§10.2)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 16. MANAGER â€” booking detail sheet (Â§10.2)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function timelineHtml(events) {
   if (!events || !events.length) return '<div class="empty">No history yet</div>';
   return `<div class="tl">${events.slice().reverse().map((e) => `
     <div class="tl-item">
       <div class="t">${esc(e.local_at || e.time || dateTimeLabel(e.created_at))}</div>
       <div class="m">${esc(e.message || e.type)}</div>
-      <div class="who">${esc(e.actor_name || e.actor_type || 'System')}${e.to_status ? ` · → ${esc(e.to_status)}` : ''}</div>
+      <div class="who">${esc(e.actor_name || e.actor_type || 'System')}${e.to_status ? ` Â· â†’ ${esc(e.to_status)}` : ''}</div>
     </div>`).join('')}</div>`;
 }
 
@@ -1360,8 +1440,8 @@ function moneyBreakdown(b) {
     <div class="kv"><span class="k">Total paid by customer</span><span class="v">${peso(b.total)}</span></div>
     <div class="kv"><span class="k">Delivery fee (Df)</span><span class="v">${peso(b.delivery_fee || 0)}</span></div>
     <div class="kv"><span class="k">Food value (basis)</span><span class="v">${peso(food)}</span></div>
-    <div class="kv"><span class="k">Manager commission${b.commission_rate != null ? ` (${pct(b.commission_rate)})` : ''}</span><span class="v">${b.commission_amount != null ? peso(b.commission_amount) : '—'}</span></div>
-    <div class="kv total"><span class="k">Rider payout</span><span class="v">${b.rider_payout != null ? peso(b.rider_payout) : '—'}</span></div>`;
+    <div class="kv"><span class="k">Manager commission${b.commission_rate != null ? ` (${pct(b.commission_rate)})` : ''}</span><span class="v">${b.commission_amount != null ? peso(b.commission_amount) : 'â€”'}</span></div>
+    <div class="kv total"><span class="k">Rider payout</span><span class="v">${b.rider_payout != null ? peso(b.rider_payout) : 'â€”'}</span></div>`;
 }
 
 views['manager/bookings/:id'] = {
@@ -1381,30 +1461,30 @@ views['manager/bookings/:id'] = {
           ${statusPill(b.status)}
         </div>
         <div class="bk-sub">${esc(b.customer_name || 'Walk-in / unnamed')}
-          ${b.customer_phone ? ` · <a href="tel:${esc(b.customer_phone)}" style="color:var(--accent-2)">${esc(b.customer_phone)}</a>` : ''}
+          ${b.customer_phone ? ` Â· <a href="tel:${esc(b.customer_phone)}" style="color:var(--accent-2)">${esc(b.customer_phone)}</a>` : ''}
         </div>
         <div class="bk-meta">
           <span>${esc(dateTimeLabel(b.created_at))}</span>
           ${b.date_ref ? `<span>day ${esc(b.date_ref)}</span>` : ''}
-          ${b.priority === 'HIGH' ? '<span>🔥 HIGH priority</span>' : ''}
+          ${b.priority === 'HIGH' ? '<span>ðŸ”¥ HIGH priority</span>' : ''}
           ${b.source ? `<span>${esc(b.source)}</span>` : ''}
         </div>
         ${b.assigned_rider_id ? `<div class="rider-line">
             <span data-rider-dot="${b.assigned_rider_id}" class="${b.rider_online === false ? 'dot-offline' : 'dot-online'}"></span>
-            ${esc(b.rider_name || 'Rider')}${b.rider_phone ? ` · ${esc(b.rider_phone)}` : ''}
+            ${esc(b.rider_name || 'Rider')}${b.rider_phone ? ` Â· ${esc(b.rider_phone)}` : ''}
           </div>` : '<div class="rider-line"><span class="dot-offline"></span>Unassigned</div>'}
-        ${riderWarn(b) ? '<div class="warn-line">⚠ Ongoing · the rider\'s phone has gone offline</div>' : ''}
-        ${archived ? '<div class="warn-line">📦 Archived — this booking is hidden from the board</div>' : ''}
+        ${riderWarn(b) ? '<div class="warn-line">âš  Ongoing Â· the rider\'s phone has gone offline</div>' : ''}
+        ${archived ? '<div class="warn-line">ðŸ“¦ Archived â€” this booking is hidden from the board</div>' : ''}
       </div>
 
-      ${b.nav ? `<button class="nav-cta" id="nav-app">🗺️ NAVIGATE</button>
+      ${b.nav ? `<button class="nav-cta" id="nav-app">ðŸ—ºï¸ NAVIGATE</button>
         <button class="btn maps" id="nav-maps">Open in Google Maps</button>`
-        : '<div class="no-pin">📍 No drop-off pin on this booking — read the details below</div>'}
+        : '<div class="no-pin">ðŸ“ No drop-off pin on this booking â€” read the details below</div>'}
 
       <div class="section-title">Money</div>
       <div class="card">${moneyBreakdown(b)}</div>
 
-      ${section(`Requests · ${reqs.length}`, reqs.length ? requestCards(reqs, { showOpen: false }) : '')}
+      ${section(`Requests Â· ${reqs.length}`, reqs.length ? requestCards(reqs, { showOpen: false }) : '')}
 
       ${section('Actions', `
         <div class="card tight">
@@ -1439,7 +1519,7 @@ function wireBookingDetail(el, b) {
   on('[data-note]', () => {
     fire((async () => {
       const msg = await promptSheet('Add a manager note', {
-        label: 'Internal only — the rider never sees this', multiline: true,
+        label: 'Internal only â€” the rider never sees this', multiline: true,
       });
       if (msg == null) return;
       await run(() => api(`/api/manager/bookings/${b.id}/note`, { method: 'POST', body: { message: msg } }), 'Note added');
@@ -1463,13 +1543,13 @@ function wireBookingDetail(el, b) {
   bindRequestActions(el);                       // shared: approve / reject
 }
 
-/** Edit the money/customer fields. PUT /manager/bookings/:id (§9.3). */
+/** Edit the money/customer fields. PUT /manager/bookings/:id (Â§9.3). */
 function editBookingSheet(b) {
   const sheet = openSheet(`
     <h3>Edit ${esc(b.ref)}</h3>
-    <div class="field"><span>Total (₱)</span>
+    <div class="field"><span>Total (â‚±)</span>
       <input id="ed-total" type="text" inputmode="decimal" value="${b.total != null ? b.total : ''}"></div>
-    <div class="field"><span>Delivery fee Df (₱)</span>
+    <div class="field"><span>Delivery fee Df (â‚±)</span>
       <input id="ed-df" type="text" inputmode="decimal" value="${b.delivery_fee != null ? b.delivery_fee : 0}"></div>
     <div class="field"><span>Customer name</span>
       <input id="ed-name" type="text" value="${esc(b.customer_name || '')}"></div>
@@ -1511,9 +1591,9 @@ function editBookingSheet(b) {
     fire(run(() => api(`/api/manager/bookings/${b.id}`, { method: 'PUT', body }), 'Booking updated'));
   };
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 17. MANAGER — paste a booking (§6.5.4, §10.2)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 17. MANAGER â€” paste a booking (Â§6.5.4, Â§10.2)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 views['manager/new'] = {
   title: 'New booking',
   tab: 'new',
@@ -1523,10 +1603,10 @@ views['manager/new'] = {
       <div class="card">
         <div class="field">
           <span>Paste the Messenger booking here</span>
-          <textarea id="raw" rows="12" placeholder="Paste everything — the app reads only Total, Df and the Waze pin.&#10;Everything else is kept verbatim for the rider."></textarea>
+          <textarea id="raw" rows="12" placeholder="Paste everything â€” the app reads only Total, Df and the Waze pin.&#10;Everything else is kept verbatim for the rider."></textarea>
         </div>
         <div style="display:flex;gap:8px">
-          <button class="btn" id="btn-clip">📋 Paste from clipboard</button>
+          <button class="btn" id="btn-clip">ðŸ“‹ Paste from clipboard</button>
           <button class="btn primary" id="btn-read">Read details</button>
         </div>
         <div class="form-error hidden" id="parse-err" style="margin-top:12px"></div>
@@ -1542,7 +1622,7 @@ views['manager/new'] = {
         if (text) { raw.value = text; toast('Pasted from clipboard', 'ok'); }
         else toast('Clipboard is empty', 'err');
       } catch {
-        toast('Clipboard blocked — long-press the box and paste', 'err');
+        toast('Clipboard blocked â€” long-press the box and paste', 'err');
       }
     };
 
@@ -1572,27 +1652,27 @@ views['manager/new'] = {
 function renderPreview(el, p) {
   const box = $('#preview', el);
   const pin = p.has_pin
-    ? `<span style="color:var(--green)">📍 pin found (${Number(p.lat).toFixed(5)}, ${Number(p.lng).toFixed(5)})</span>`
+    ? `<span style="color:var(--green)">ðŸ“ pin found (${Number(p.lat).toFixed(5)}, ${Number(p.lng).toFixed(5)})</span>`
     : (p.link_error
-      ? '<span style="color:var(--red)">📍 a Waze link was found but gave no coordinates</span>'
-      : '<span style="color:var(--text-3)">📍 no pin — the rider reads the details</span>');
+      ? '<span style="color:var(--red)">ðŸ“ a Waze link was found but gave no coordinates</span>'
+      : '<span style="color:var(--text-3)">ðŸ“ no pin â€” the rider reads the details</span>');
 
   const blocked = !p.can_create && !p.link_error;
   box.innerHTML = `
     <div class="section-title">Check these three things</div>
     <div class="card">
       <div class="field" style="margin-bottom:12px">
-        <span>Total (₱) ${p.total == null ? '— required' : ''}</span>
+        <span>Total (â‚±) ${p.total == null ? 'â€” required' : ''}</span>
         <input id="pv-total" type="text" inputmode="decimal" value="${p.total != null ? p.total : ''}" placeholder="e.g. 1000">
       </div>
       <div class="field" style="margin-bottom:12px">
-        <span>Df — delivery fee (₱)${p.has_df_line ? '' : ' — none found in the paste'}</span>
+        <span>Df â€” delivery fee (â‚±)${p.has_df_line ? '' : ' â€” none found in the paste'}</span>
         <input id="pv-df" type="text" inputmode="decimal" value="${p.delivery_fee != null ? p.delivery_fee : 0}">
       </div>
       <div class="kv" style="font-size:13px"><span class="k">Drop-off</span><span class="v">${pin}</span></div>
-      ${p.money_error ? `<div class="warn-line">⚠ ${esc(p.money_error)}</div>` : ''}
-      ${p.link_error ? `<div class="warn-line">⚠ Create is blocked until you confirm text-only</div>` : ''}
-      ${blocked ? `<div class="warn-line">⚠ ${esc(p.money_error || 'A booking total is required')}</div>` : ''}
+      ${p.money_error ? `<div class="warn-line">âš  ${esc(p.money_error)}</div>` : ''}
+      ${p.link_error ? `<div class="warn-line">âš  Create is blocked until you confirm text-only</div>` : ''}
+      ${blocked ? `<div class="warn-line">âš  ${esc(p.money_error || 'A booking total is required')}</div>` : ''}
     </div>
 
     <div class="section-title">Optional</div>
@@ -1635,24 +1715,24 @@ function renderPreview(el, p) {
     })());
   };
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 18. MANAGER — requests queue + rider roster (§10.2)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 18. MANAGER â€” requests queue + rider roster (Â§10.2)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function requestCards(reqs, opts = {}) {
-  if (!reqs.length) return emptyBox('✅', 'No riders waiting for approval');
+  if (!reqs.length) return emptyBox('âœ…', 'No riders waiting for approval');
   // ONE renderer for both the dashboard strip and the Requests page. They used to
   // be separate copies that had already drifted (the dashboard copy lost the
-  // "Open" button) — the option now drives the difference instead.
+  // "Open" button) â€” the option now drives the difference instead.
   return reqs.map((r) => `
     <div class="req-card">
       <div class="req-top">
         <div>
           <div class="req-name">${esc(r.rider_name || 'Rider')}</div>
-          <div class="req-note">wants ${esc(r.ref || `#${r.booking_id}`)}${r.customer_name ? ` · ${esc(r.customer_name)}` : ''}</div>
+          <div class="req-note">wants ${esc(r.ref || `#${r.booking_id}`)}${r.customer_name ? ` Â· ${esc(r.customer_name)}` : ''}</div>
         </div>
         <div class="bk-money">${r.total != null ? peso(r.total) : ''}</div>
       </div>
-      ${r.note ? `<div class="req-note">“${esc(r.note)}”</div>` : ''}
+      ${r.note ? `<div class="req-note">â€œ${esc(r.note)}â€</div>` : ''}
       <div class="req-actions">
         <button class="btn success small" data-approve="${r.id}">Approve</button>
         <button class="btn danger small" data-reject="${r.id}">Reject</button>
@@ -1676,7 +1756,7 @@ function bindRequestActions(el) {
     b.onclick = () => {
       fire((async () => {
         const reason = await promptSheet('Reject this request', {
-          label: 'Reason (optional — the rider sees it)', required: false,
+          label: 'Reason (optional â€” the rider sees it)', required: false,
         });
         if (reason == null) return;
         await run(
@@ -1697,7 +1777,7 @@ views['manager/requests'] = {
   async mount(el) {
     const reqs = await api('/api/manager/requests');
     if (reqs.length !== store.pendingReqs) { store.pendingReqs = reqs.length; paintReqBadge(); }
-    el.innerHTML = `${section(`Waiting on you · ${reqs.length}`, requestCards(reqs))}
+    el.innerHTML = `${section(`Waiting on you Â· ${reqs.length}`, requestCards(reqs))}
       <button class="btn ghost block" id="back-home">Back to dashboard</button>`;
     bindRequestActions(el);
     $('#back-home', el).onclick = () => { location.hash = '#/manager/dashboard'; };
@@ -1721,10 +1801,10 @@ views['manager/riders'] = {
             <span class="presence ${r.online ? 'on' : 'off'}" data-presence="${r.id}"></span>
           </span>
           <div style="flex:1;min-width:0">
-            <div style="font-weight:800">${esc(r.full_name)}${Number(r.is_active) === 1 ? '' : ' <span style="color:var(--text-3);font-size:12px">· inactive</span>'}</div>
-            <div style="color:var(--text-3);font-size:12.5px">@${esc(r.username || '')}${r.vehicle ? ` · ${esc(r.vehicle)}` : ''}${r.plate ? ` · ${esc(r.plate)}` : ''}</div>
+            <div style="font-weight:800">${esc(r.full_name)}${Number(r.is_active) === 1 ? '' : ' <span style="color:var(--text-3);font-size:12px">Â· inactive</span>'}</div>
+            <div style="color:var(--text-3);font-size:12.5px">@${esc(r.username || '')}${r.vehicle ? ` Â· ${esc(r.vehicle)}` : ''}${r.plate ? ` Â· ${esc(r.plate)}` : ''}</div>
             <div style="font-size:12.5px;color:var(--text-2);margin-top:2px">
-              ${Number(r.active_jobs || 0)} active · owed <strong>${peso(r.owed)}</strong>
+              ${Number(r.active_jobs || 0)} active Â· owed <strong>${peso(r.owed)}</strong>
             </div>
           </div>
         </div>
@@ -1743,10 +1823,10 @@ views['manager/riders'] = {
           <div style="font-size:12px;color:var(--text-3);text-transform:uppercase;letter-spacing:.5px">Total owed to riders</div>
           <div style="font-size:22px;font-weight:800" class="money">${peso(owedTotal)}</div>
         </div>
-        <button class="btn primary small" id="add-rider">＋ Add rider</button>
+        <button class="btn primary small" id="add-rider">ï¼‹ Add rider</button>
       </div>
-      ${section(`Active · ${active.length}`, active.length ? active.map(card).join('') : emptyBox('🏍', 'Register your first rider'))}
-      ${inactive.length ? section(`Inactive · ${inactive.length}`, inactive.map(card).join('')) : ''}
+      ${section(`Active Â· ${active.length}`, active.length ? active.map(card).join('') : emptyBox('ðŸ', 'Register your first rider'))}
+      ${inactive.length ? section(`Inactive Â· ${inactive.length}`, inactive.map(card).join('')) : ''}
     `;
 
     $('#add-rider', el).onclick = () => fire(registerRiderSheet());
@@ -1797,7 +1877,7 @@ views['manager/riders'] = {
 function showTempPassword(name, temp) {
   const sheet = openSheet(`
     <h3>Temporary password</h3>
-    <p style="color:var(--text-2);font-size:14px">Give this to ${esc(name)} — it is shown once and never again.</p>
+    <p style="color:var(--text-2);font-size:14px">Give this to ${esc(name)} â€” it is shown once and never again.</p>
     <div class="details-box" style="font-size:20px;font-weight:800;text-align:center">${esc(temp)}</div>
     <div class="sheet-actions"><button class="btn primary" data-ok>Done</button></div>`);
   $('[data-ok]', sheet).onclick = () => closeSheet();
@@ -1810,7 +1890,7 @@ function registerRiderSheet() {
   const sheet = openSheet(`
     <h3>Register a rider</h3>
     <div class="field"><span>Full name</span><input id="rg-name" type="text" placeholder="e.g. Jose Ramos"></div>
-    <div class="field"><span>Username</span><input id="rg-user" type="text" autocapitalize="none" spellcheck="false" placeholder="3–32 chars: a-z 0-9 . _ -"></div>
+    <div class="field"><span>Username</span><input id="rg-user" type="text" autocapitalize="none" spellcheck="false" placeholder="3â€“32 chars: a-z 0-9 . _ -"></div>
     <div class="field"><span>Temporary password</span>
       <div style="display:flex;gap:8px">
         <input id="rg-pass" type="text" value="${esc(randPassword())}" style="flex:1">
@@ -1839,7 +1919,7 @@ function registerRiderSheet() {
     };
     const err = $('[data-err]', sheet);
     if (!body.full_name) { err.textContent = 'Full name is required'; err.classList.remove('hidden'); return; }
-    if (!/^[a-z0-9._-]{3,32}$/.test(body.username)) { err.textContent = 'Username must be 3–32 chars of a-z 0-9 . _ -'; err.classList.remove('hidden'); return; }
+    if (!/^[a-z0-9._-]{3,32}$/.test(body.username)) { err.textContent = 'Username must be 3â€“32 chars of a-z 0-9 . _ -'; err.classList.remove('hidden'); return; }
     if (body.password.length < 8) { err.textContent = 'Password must be at least 8 characters'; err.classList.remove('hidden'); return; }
     closeSheet();
     fire((async () => {
@@ -1878,9 +1958,9 @@ function editRiderSheet(r) {
     fire(run(() => api(`/api/manager/riders/${r.id}`, { method: 'PUT', body }), 'Rider updated'));
   };
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 19. MANAGER — rider profile + earnings (§6.7)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 19. MANAGER â€” rider profile + earnings (Â§6.7)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const PERIODS = [
   { key: 'today', label: 'Today' },
   { key: '7d', label: '7 days' },
@@ -1891,9 +1971,9 @@ let riderPeriod = 'month';
 
 /**
  * The client states the INTENT ("this month"), never a Date built from its own
- * clock. The server resolves the boundaries in the store's timezone — otherwise
+ * clock. The server resolves the boundaries in the store's timezone â€” otherwise
  * a phone whose timezone differs from the store silently shows the wrong money
- * (§R16, the bug this codebase exists to avoid). See resolvePeriod() in
+ * (Â§R16, the bug this codebase exists to avoid). See resolvePeriod() in
  * services/day.ts.
  */
 function periodQuery() {
@@ -1912,17 +1992,17 @@ function moneyTable(ledger) {
         <td>${esc(r.ref)}</td>
         <td>${esc(dateLabel(r.delivered_at || r.created_at))}</td>
         <td>${peso(r.total)}</td>
-        <td class="num">${r.delivery_fee != null ? peso(r.delivery_fee) : '—'}</td>
-        <td class="num">${r.food_value != null ? peso(r.food_value) : '—'}</td>
-        <td class="num">${r.commission_rate != null ? pct(r.commission_rate) : '—'}</td>
-        <td class="num">${r.commission_amount != null ? peso(r.commission_amount) : '—'}</td>
-        <td class="num"><strong>${r.rider_payout != null ? peso(r.rider_payout) : '—'}</strong></td>
+        <td class="num">${r.delivery_fee != null ? peso(r.delivery_fee) : 'â€”'}</td>
+        <td class="num">${r.food_value != null ? peso(r.food_value) : 'â€”'}</td>
+        <td class="num">${r.commission_rate != null ? pct(r.commission_rate) : 'â€”'}</td>
+        <td class="num">${r.commission_amount != null ? peso(r.commission_amount) : 'â€”'}</td>
+        <td class="num"><strong>${r.rider_payout != null ? peso(r.rider_payout) : 'â€”'}</strong></td>
       </tr>`).join('')}
     </tbody>
   </table></div>`;
 }
 
-/** CSV downloads need the JWT — fetch as a blob, never a bare <a href>. */
+/** CSV downloads need the JWT â€” fetch as a blob, never a bare <a href>. */
 async function downloadCsv(path, filename) {
   try {
     const res = await fetch(path, { headers: { Authorization: `Bearer ${store.token}` } });
@@ -1953,7 +2033,7 @@ views['manager/riders/:id'] = {
     ]);
     store.riders = roster;
     const rider = roster.find((r) => Number(r.id) === Number(loc.id));
-    if (!rider) { el.innerHTML = emptyBox('🚫', 'Rider not found'); return; }
+    if (!rider) { el.innerHTML = emptyBox('ðŸš«', 'Rider not found'); return; }
 
     const e = money.earnings || {};
     const stats = money.stats || {};
@@ -1967,9 +2047,9 @@ views['manager/riders/:id'] = {
           </span>
           <div style="flex:1;min-width:0">
             <div style="font-weight:800;font-size:17px">${esc(rider.full_name)}</div>
-            <div style="color:var(--text-3);font-size:12.5px">@${esc(rider.username || '')}${rider.vehicle ? ` · ${esc(rider.vehicle)}` : ''}${rider.plate ? ` · ${esc(rider.plate)}` : ''}</div>
+            <div style="color:var(--text-3);font-size:12.5px">@${esc(rider.username || '')}${rider.vehicle ? ` Â· ${esc(rider.vehicle)}` : ''}${rider.plate ? ` Â· ${esc(rider.plate)}` : ''}</div>
             <div style="font-size:12.5px;color:${rider.online ? 'var(--green)' : 'var(--text-3)'};margin-top:2px">
-              ${rider.online ? '🟢 online now' : '⚪ offline'}${lastPayout ? ` · last payout ${esc(dateLabel(lastPayout.created_at))}` : ''}
+              ${rider.online ? 'ðŸŸ¢ online now' : 'âšª offline'}${lastPayout ? ` Â· last payout ${esc(dateLabel(lastPayout.created_at))}` : ''}
             </div>
           </div>
         </div>
@@ -1984,9 +2064,9 @@ views['manager/riders/:id'] = {
 
       <div class="owed-banner">
         <div>
-          <div class="lbl">⚠ Owed to rider</div>
+          <div class="lbl">âš  Owed to rider</div>
           <div class="amt">${peso(e.owed)}</div>
-          <div class="sub">Earned ${peso(e.earned)} · paid ${peso(e.paid)}</div>
+          <div class="sub">Earned ${peso(e.earned)} Â· paid ${peso(e.paid)}</div>
         </div>
         <button class="btn primary small" id="record-payout">Record payout</button>
       </div>
@@ -1995,24 +2075,24 @@ views['manager/riders/:id'] = {
         ${PERIODS.map((p) => `<button class="chip${riderPeriod === p.key ? ' active' : ''}" data-period="${p.key}">${esc(p.label)}</button>`).join('')}
       </div>
       ${money.period && money.period.from ? `<div class="range-note">
-        Server-resolved in ${esc(store.config.store_timezone || 'store time')}: ${esc(dateTimeLabel(money.period.from))} → ${esc(dateTimeLabel(money.period.to))}
+        Server-resolved in ${esc(store.config.store_timezone || 'store time')}: ${esc(dateTimeLabel(money.period.from))} â†’ ${esc(dateTimeLabel(money.period.to))}
       </div>` : ''}
 
       <div class="section-title">
-        <span>Per-booking money · ${(money.ledger || []).length}</span>
+        <span>Per-booking money Â· ${(money.ledger || []).length}</span>
         <button class="btn small ghost" id="export-csv">Export CSV</button>
       </div>
       <div class="card tight">${moneyTable(money.ledger)}</div>
 
-      ${section(`Payout history · ${(money.payouts || []).length}`, (money.payouts || []).length
+      ${section(`Payout history Â· ${(money.payouts || []).length}`, (money.payouts || []).length
         ? (money.payouts || []).map((p) => `
             <div class="card tight" style="display:flex;justify-content:space-between;align-items:center;gap:10px">
               <div>
                 <div style="font-weight:800" class="money">${peso(p.amount)}${p.is_void ? ' <span style="color:var(--red);font-size:12px">VOID</span>' : ''}</div>
                 <div style="font-size:12.5px;color:var(--text-3)">
-                  ${esc(p.method || 'CASH')} · ${esc(dateLabel(p.created_at))}${p.reference ? ` · ref ${esc(p.reference)}` : ''}
+                  ${esc(p.method || 'CASH')} Â· ${esc(dateLabel(p.created_at))}${p.reference ? ` Â· ref ${esc(p.reference)}` : ''}
                 </div>
-                ${p.note ? `<div style="font-size:12.5px;color:var(--text-2)">“${esc(p.note)}”</div>` : ''}
+                ${p.note ? `<div style="font-size:12.5px;color:var(--text-2)">â€œ${esc(p.note)}â€</div>` : ''}
                 ${p.is_void && p.void_reason ? `<div style="font-size:12px;color:var(--red)">voided: ${esc(p.void_reason)}</div>` : ''}
               </div>
               ${p.is_void ? '' : `<button class="btn danger small" data-void="${p.id}">Void</button>`}
@@ -2066,9 +2146,9 @@ function wireRiderMoney(el, rider, earnings) {
     };
   });
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 20. TEAM CHAT — one shared room for both roles (§6.11, §10.2, §10.3)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 20. TEAM CHAT â€” one shared room for both roles (Â§6.11, Â§10.2, Â§10.3)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function chatBodyHtml(body) {
   return esc(body).replace(/@([a-z0-9._-]{3,32})/gi, '<strong>@$1</strong>');
 }
@@ -2079,7 +2159,7 @@ function chatMsgHtml(m) {
     return `<div class="booking-card-msg" data-msg="${m.id}">
       <div class="ref">${esc(m.booking_ref || 'Booking')}</div>
       <div class="line">${esc(m.body || '')}</div>
-      <div class="line">${esc(m.sender_name)} · ${esc(timeLabel(m.created_at))}</div>
+      <div class="line">${esc(m.sender_name)} Â· ${esc(timeLabel(m.created_at))}</div>
       ${m.booking_status ? `<div style="margin-top:6px">${statusPill(m.booking_status)}</div>` : ''}
       <div class="row">
         ${store.isRider ? `<button class="btn primary small" data-req="${m.booking_id}">Request</button>` : ''}
@@ -2093,7 +2173,7 @@ function chatMsgHtml(m) {
   }
   return `<div class="msg${mine ? ' mine' : ''}" data-msg="${m.id}">
     <div class="bubble">
-      ${mine ? '' : `<div class="who">${esc(m.sender_name)}${m.sender_role === 'MANAGER' ? ' 👔' : ''}</div>`}
+      ${mine ? '' : `<div class="who">${esc(m.sender_name)}${m.sender_role === 'MANAGER' ? ' ðŸ‘”' : ''}</div>`}
       <div class="body">${m.deleted ? '<em style="color:var(--text-3)">message deleted</em>' : chatBodyHtml(m.body || '')}</div>
       <div class="t">${esc(timeLabel(m.created_at))}</div>
     </div>
@@ -2115,7 +2195,7 @@ function wireChatMessages(scope) {
   $$('[data-del]', log).forEach((b) => {
     b.onclick = () => {
       fire((async () => {
-        const ok = await confirmSheet('Delete this message?', 'It stays in the transcript as “message deleted”.', 'Delete', true);
+        const ok = await confirmSheet('Delete this message?', 'It stays in the transcript as â€œmessage deletedâ€.', 'Delete', true);
         if (!ok) return;
         await run(() => api(`/api/chat/messages/${b.getAttribute('data-del')}`, { method: 'DELETE' }), 'Message deleted');
       })());
@@ -2157,17 +2237,17 @@ function chatSkeleton() {
   return `
     <div class="chat-wrap">
       <div class="chat-header">
-        <div class="chat-online">🟢 <span id="chat-online-count">${chatState.onlineUsers.size}</span> online</div>
+        <div class="chat-online">ðŸŸ¢ <span id="chat-online-count">${chatState.onlineUsers.size}</span> online</div>
         <div style="display:flex;gap:6px">
           <button class="btn small ghost" id="chat-people">Team</button>
           ${store.isManager ? '<button class="btn small ghost" id="chat-export">Export</button>' : ''}
         </div>
       </div>
       <div class="chat-log" id="chat-log"></div>
-      <button class="new-pill hidden" id="new-pill">↓ New messages</button>
+      <button class="new-pill hidden" id="new-pill">â†“ New messages</button>
       <div class="composer">
-        <textarea id="chat-input" rows="1" maxlength="500" placeholder="Message the team… use @name to mention"></textarea>
-        <button class="send" id="chat-send" aria-label="Send">➤</button>
+        <textarea id="chat-input" rows="1" maxlength="500" placeholder="Message the teamâ€¦ use @name to mention"></textarea>
+        <button class="send" id="chat-send" aria-label="Send">âž¤</button>
       </div>
     </div>`;
 }
@@ -2198,7 +2278,7 @@ async function sendChatMessage(text) {
   const tmp = 'tmp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   log.insertAdjacentHTML('beforeend', `
     <div class="msg mine pending" data-msg="${tmp}">
-      <div class="bubble"><div class="body">${chatBodyHtml(text)}</div><div class="t">sending…</div></div>
+      <div class="bubble"><div class="body">${chatBodyHtml(text)}</div><div class="t">sendingâ€¦</div></div>
     </div>`);
   scrollChat(true);
   try {
@@ -2221,7 +2301,7 @@ function chatView(tabKey) {
     title: 'Team chat',
     tab: 'chat',
     chatMode: true,
-    live: false,   // the chat patches itself from SSE — no full repaint
+    live: false,   // the chat patches itself from SSE â€” no full repaint
     async mount(el) {
       chatState.ids = new Set();
       chatState.oldest = null;
@@ -2236,7 +2316,7 @@ function chatView(tabKey) {
       try {
         await loadChatMessages(el, false);
       } catch (err) {
-        log.innerHTML = emptyBox('💬', err.message || 'Could not load chat');
+        log.innerHTML = emptyBox('ðŸ’¬', err.message || 'Could not load chat');
       }
       store.unread = 0;
       paintUnread();
@@ -2279,13 +2359,13 @@ async function showTeamSheet() {
   let people = [];
   try { people = await api('/api/chat/participants'); } catch { people = []; }
   const sheet = openSheet(`
-    <h3>Team · ${people.length}</h3>
+    <h3>Team Â· ${people.length}</h3>
     <div class="pick-list">${people.map((p) => `
       <div class="pick">
         <span class="avatar" style="width:34px;height:34px;font-size:12px">${esc(initials(p.name))}</span>
         <span class="grow">
-          <span class="nm">${esc(p.name)}${p.role === 'MANAGER' ? ' 👔' : ''}</span>
-          <span class="sub">@${esc(p.handle)} — tap to mention</span>
+          <span class="nm">${esc(p.name)}${p.role === 'MANAGER' ? ' ðŸ‘”' : ''}</span>
+          <span class="sub">@${esc(p.handle)} â€” tap to mention</span>
         </span>
       </div>`).join('') || '<div class="empty">Nobody else yet</div>'}
     </div>
@@ -2293,9 +2373,9 @@ async function showTeamSheet() {
   $('[data-ok]', sheet).onclick = () => closeSheet();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 21. MANAGER — audit history (§6.10.4)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 21. MANAGER â€” audit history (Â§6.10.4)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const HISTORY_TYPES = [
   { key: '', label: 'Everything' },
   { key: 'BOOKING', label: 'Bookings' },
@@ -2307,7 +2387,7 @@ const HISTORY_TYPES = [
 let historyFilter = { type: '', q: '', page: 1, rows: [], total: 0 };
 
 function historyRowsHtml(rows) {
-  if (!rows.length) return emptyBox('🧾', 'Nothing recorded yet');
+  if (!rows.length) return emptyBox('ðŸ§¾', 'Nothing recorded yet');
   let lastDay = '';
   return rows.map((r) => {
     const dayHeader = r.day !== lastDay ? `<div class="section-title">${esc(r.day || '')}</div>` : '';
@@ -2318,12 +2398,12 @@ function historyRowsHtml(rows) {
           <div style="min-width:0">
             <div style="font-weight:700;font-size:14px">${esc(r.message || r.type)}</div>
             <div style="font-size:12.5px;color:var(--text-3)">
-              ${esc(r.actor_name || 'System')} · ${esc(r.type)}${r.ref ? ` · ${esc(r.ref)}` : ''}
-              ${r.from_status && r.to_status ? ` · ${esc(r.from_status)} → ${esc(r.to_status)}` : ''}
+              ${esc(r.actor_name || 'System')} Â· ${esc(r.type)}${r.ref ? ` Â· ${esc(r.ref)}` : ''}
+              ${r.from_status && r.to_status ? ` Â· ${esc(r.from_status)} â†’ ${esc(r.to_status)}` : ''}
             </div>
           </div>
           <div style="text-align:right;white-space:nowrap">
-            ${r.amount_delta != null ? `<div class="money" style="font-weight:800;color:${Number(r.amount_delta) < 0 ? 'var(--red)' : 'var(--green)'}">${Number(r.amount_delta) < 0 ? '−' : '+'}${peso(Math.abs(Number(r.amount_delta)))}</div>` : ''}
+            ${r.amount_delta != null ? `<div class="money" style="font-weight:800;color:${Number(r.amount_delta) < 0 ? 'var(--red)' : 'var(--green)'}">${Number(r.amount_delta) < 0 ? 'âˆ’' : '+'}${peso(Math.abs(Number(r.amount_delta)))}</div>` : ''}
             <div style="font-size:12px;color:var(--text-3)">${esc(r.time || '')}</div>
           </div>
         </div>
@@ -2385,9 +2465,9 @@ views['manager/history'] = {
     };
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 22. Push subscription (§6.11.4 — only BOOKING cards and @mentions push)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 22. Push subscription (Â§6.11.4 â€” only BOOKING cards and @mentions push)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function urlBase64ToUint8Array(base64) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
   const b64 = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -2431,13 +2511,13 @@ async function disablePush() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 23. MANAGER — settings (§6.8). Every change applies instantly, no redeploy.
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 23. MANAGER â€” settings (Â§6.8). Every change applies instantly, no redeploy.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const SETTINGS_SPEC = [
   {
     group: 'Commission',
-    note: 'Changes apply to NEW bookings only — past earnings are never rewritten.',
+    note: 'Changes apply to NEW bookings only â€” past earnings are never rewritten.',
     items: [
       { key: 'booking_commission_enabled', type: 'toggle', label: 'Commission enabled' },
       { key: 'commission_rate', type: 'number', label: 'Commission rate (%)', commission: true },
@@ -2468,11 +2548,11 @@ const SETTINGS_SPEC = [
   },
   {
     group: 'History & locale',
-    note: 'The store timezone decides what “today” means for the dispatch day.',
+    note: 'The store timezone decides what â€œtodayâ€ means for the dispatch day.',
     items: [
       { key: 'store_timezone', type: 'text', label: 'Store timezone', placeholder: 'Asia/Manila' },
       { key: 'booking_history_page_size', type: 'number', label: 'History rows per page' },
-      { key: 'day_cutoff_hour', type: 'number', label: 'Day cutoff hour (0–23)' },
+      { key: 'day_cutoff_hour', type: 'number', label: 'Day cutoff hour (0â€“23)' },
       { key: 'auto_rollover', type: 'toggle', label: 'Roll the day over at the cutoff' },
     ],
   },
@@ -2495,7 +2575,7 @@ const SETTINGS_SPEC = [
   },
   {
     group: 'Chat push',
-    note: 'Plain chatter is never pushed — only these two exceptions.',
+    note: 'Plain chatter is never pushed â€” only these two exceptions.',
     items: [
       { key: 'push_chat_enabled', type: 'toggle', label: 'Chat push master switch' },
       { key: 'push_chat_booking_cards', type: 'toggle', label: 'Push BOOKING cards' },
@@ -2510,7 +2590,7 @@ const SETTINGS_SPEC = [
 /**
  * Client-side mirror of validateSetting() in services/settings.ts. Settings
  * commit on BLUR, so a stray tap could otherwise persist a half-typed value
- * ("1" while the manager meant "15") — on commission_rate that is a money bug.
+ * ("1" while the manager meant "15") â€” on commission_rate that is a money bug.
  * The server validates too; this only avoids a pointless round-trip and lets
  * the field visibly revert.
  */
@@ -2614,16 +2694,16 @@ views['manager/settings'] = {
                     aria-pressed="${(store.theme || 'dark') === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}
         </div>
         <div class="range-note">
-          Riders work nights and daylight. “System” follows this phone’s
+          Riders work nights and daylight. â€œSystemâ€ follows this phoneâ€™s
           ${prefersLight() ? 'light' : 'dark'} setting and updates as it changes.
         </div>
       </div>`)}
 
       ${section('App', `<div class="card tight">
-        <div class="kv"><span class="k">Version</span><span class="v">${esc(cfg.version || '—')}</span></div>
-        <div class="kv"><span class="k">Store</span><span class="v">${esc(cfg.store_label || '—')}</span></div>
-        <div class="kv"><span class="k">Server timezone</span><span class="v">${esc(cfg.store_timezone || '—')}</span></div>
-        ${cfg.today_ref ? `<div class="kv"><span class="k">Right now, “today” is</span><span class="v">${esc(cfg.today_ref)}</span></div>` : ''}
+        <div class="kv"><span class="k">Version</span><span class="v">${esc(cfg.version || 'â€”')}</span></div>
+        <div class="kv"><span class="k">Store</span><span class="v">${esc(cfg.store_label || 'â€”')}</span></div>
+        <div class="kv"><span class="k">Server timezone</span><span class="v">${esc(cfg.store_timezone || 'â€”')}</span></div>
+        ${cfg.today_ref ? `<div class="kv"><span class="k">Right now, â€œtodayâ€ is</span><span class="v">${esc(cfg.today_ref)}</span></div>` : ''}
         ${cfg.day_preview ? `<div class="range-note">${esc(cfg.day_preview)}</div>` : ''}
         <button class="btn ghost block small" id="check-update" style="margin-top:12px">Check for an update</button>
       </div>`)}
@@ -2638,7 +2718,7 @@ views['manager/settings'] = {
       <button class="btn ghost block" id="logout-2" style="margin-top:6px">Sign out</button>
     `;
 
-    // ── setting writers ────────────────────────────────────────────────────────
+    // â”€â”€ setting writers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     $$('[data-set-toggle]', el).forEach((c) => {
       c.onchange = () => {
         const key = c.getAttribute('data-set-toggle');
@@ -2659,7 +2739,7 @@ views['manager/settings'] = {
       const commit = () => {
         const value = i.value.trim();
         const original = i.getAttribute('data-set-orig') || '';
-        if (value === original) return;                       // nothing typed → no write
+        if (value === original) return;                       // nothing typed â†’ no write
         const bad = validateSettingInput(key, value);
         if (bad) { revert(bad); return; }
         const call = key === 'commission_rate'
@@ -2668,7 +2748,7 @@ views['manager/settings'] = {
         fire(run(() => call, 'Setting saved').then(() => {
           i.setAttribute('data-set-orig', value);             // the new baseline for a later revert
           refreshConfig().catch(() => {});
-        }).catch(() => { revert('Not saved — the value was rejected'); }));
+        }).catch(() => { revert('Not saved â€” the value was rejected'); }));
       };
       i.onblur = commit;
       i.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); i.blur(); } };
@@ -2680,7 +2760,7 @@ views['manager/settings'] = {
     const sound = $('#pref-sound', el);
     sound.onchange = () => {
       store.sound = sound.checked;
-      localStorage.setItem('bk_sound', store.sound ? '1' : '0');
+      lsSet('bk_sound', store.sound ? '1' : '0');
       if (store.sound) chime('ok');
       toast(store.sound ? 'Sound on' : 'Sound off', 'ok');
     };
@@ -2701,9 +2781,9 @@ views['manager/settings'] = {
     $('#logout-2', el).onclick = () => logout();
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 24. MANAGER — own profile (§6.8)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 24. MANAGER â€” own profile (Â§6.8)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function commissionKwHtml(c) {
   return `
     <div class="kv"><span class="k">Accrued</span><span class="v money">${peso(c.accrued)}</span></div>
@@ -2733,7 +2813,7 @@ views['manager/profile'] = {
           <span class="avatar" style="width:52px;height:52px;font-size:18px">${esc(initials(me.full_name))}</span>
           <div>
             <div style="font-weight:800;font-size:18px">${esc(me.full_name)}</div>
-            <div style="color:var(--text-3);font-size:13px">@${esc(me.username)} · ${esc(me.role)}</div>
+            <div style="color:var(--text-3);font-size:13px">@${esc(me.username)} Â· ${esc(me.role)}</div>
           </div>
         </div>
       </div>
@@ -2743,14 +2823,14 @@ views['manager/profile'] = {
 
       ${topRiders.length ? section('Commission by rider', `<div class="card tight">
         ${topRiders.map((r) => `<div class="kv">
-            <span class="k">${esc(r.full_name || 'Rider')} <span style="color:var(--text-3)">· ${Number(r.jobs)} jobs</span></span>
+            <span class="k">${esc(r.full_name || 'Rider')} <span style="color:var(--text-3)">Â· ${Number(r.jobs)} jobs</span></span>
             <span class="v">${peso(r.accrued)} accrued</span>
           </div>`).join('')}
       </div>`) : ''}
 
       ${section('Security', `<div class="card tight">
         <button class="btn block small" id="chg-pw" style="margin-bottom:10px">Change my password</button>
-        <div style="font-size:12.5px;color:var(--text-3);margin-bottom:6px">Active sessions · ${(sessions || []).length}</div>
+        <div style="font-size:12.5px;color:var(--text-3);margin-bottom:6px">Active sessions Â· ${(sessions || []).length}</div>
         ${(sessions || []).slice(0, 6).map((s) => `<div class="kv">
             <span class="k">Session #${s.id}</span>
             <span class="v" style="font-size:12.5px">${esc(dateTimeLabel(s.created_at))}</span>
@@ -2765,15 +2845,15 @@ views['manager/profile'] = {
         </label>
         <label class="kv" style="align-items:center;cursor:pointer">
           <span class="k">Vibration</span>
-          <input type="checkbox" id="pf-haptic" ${localStorage.getItem('bk_haptic') !== '0' ? 'checked' : ''} style="width:22px;height:22px">
+          <input type="checkbox" id="pf-haptic" ${lsGet('bk_haptic') !== '0' ? 'checked' : ''} style="width:22px;height:22px">
         </label>
       </div>`)}
 
       ${section('Alerts', alertPrefsHtml())}
 
       ${section('About', `<div class="card tight">
-        <div class="kv"><span class="k">App version</span><span class="v">${esc(store.config.version || '—')}</span></div>
-        <div class="kv"><span class="k">Server</span><span class="v" id="health-line">checking…</span></div>
+        <div class="kv"><span class="k">App version</span><span class="v">${esc(store.config.version || 'â€”')}</span></div>
+        <div class="kv"><span class="k">Server</span><span class="v" id="health-line">checkingâ€¦</span></div>
         <div class="kv"><span class="k">Riders online</span><span class="v">${store.online.size}</span></div>
       </div>`)}
 
@@ -2791,10 +2871,10 @@ views['manager/profile'] = {
     }));
     $('#pf-sound', el).onchange = (e) => {
       store.sound = e.target.checked;
-      localStorage.setItem('bk_sound', store.sound ? '1' : '0');
+      lsSet('bk_sound', store.sound ? '1' : '0');
     };
     $('#pf-haptic', el).onchange = (e) => {
-      localStorage.setItem('bk_haptic', e.target.checked ? '1' : '0');
+      lsSet('bk_haptic', e.target.checked ? '1' : '0');
       if (e.target.checked) haptic([10]);
     };
     bindAlertPrefs(el);
@@ -2802,7 +2882,7 @@ views['manager/profile'] = {
 
     fetch('/health').then((r) => r.json()).then((h) => {
       const line = $('#health-line');
-      if (line) line.textContent = `${h.ok ? 'ok' : 'down'} · ${h.sse_clients} live · push ${h.push ? 'on' : 'off'}`;
+      if (line) line.textContent = `${h.ok ? 'ok' : 'down'} Â· ${h.sse_clients} live Â· push ${h.push ? 'on' : 'off'}`;
     }).catch(() => {
       const line = $('#health-line');
       if (line) line.textContent = 'unreachable';
@@ -2837,17 +2917,17 @@ function changePasswordSheet() {
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 25. MANAGER — the "More" hub
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 25. MANAGER â€” the "More" hub
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const MORE_LINKS = [
-  { href: '#/manager/new', icon: '＋', label: 'New booking', note: 'Paste a Messenger booking' },
-  { href: '#/manager/requests', icon: '🔔', label: 'Requests', note: 'Waiting on your approval' },
-  { href: '#/manager/riders', icon: '🏍', label: 'Riders', note: 'Roster, money and payouts' },
-  { href: '#/manager/history', icon: '🧾', label: 'History', note: 'The full audit ledger' },
-  { href: '#/manager/days', icon: '📅', label: 'Dispatch days', note: 'Close, open, reopen' },
-  { href: '#/manager/settings', icon: '⚙️', label: 'Settings', note: 'Commission, presence, alerts' },
-  { href: '#/manager/profile', icon: '👔', label: 'My profile', note: 'My commission and security' },
+  { href: '#/manager/new', icon: 'ï¼‹', label: 'New booking', note: 'Paste a Messenger booking' },
+  { href: '#/manager/requests', icon: 'ðŸ””', label: 'Requests', note: 'Waiting on your approval' },
+  { href: '#/manager/riders', icon: 'ðŸ', label: 'Riders', note: 'Roster, money and payouts' },
+  { href: '#/manager/history', icon: 'ðŸ§¾', label: 'History', note: 'The full audit ledger' },
+  { href: '#/manager/days', icon: 'ðŸ“…', label: 'Dispatch days', note: 'Close, open, reopen' },
+  { href: '#/manager/settings', icon: 'âš™ï¸', label: 'Settings', note: 'Commission, presence, alerts' },
+  { href: '#/manager/profile', icon: 'ðŸ‘”', label: 'My profile', note: 'My commission and security' },
 ];
 
 views['manager/more'] = {
@@ -2862,10 +2942,10 @@ views['manager/more'] = {
           <span style="display:block;font-weight:700">${esc(l.label)}</span>
           <span style="display:block;font-size:12.5px;color:var(--text-3)">${esc(l.note)}</span>
         </span>
-        <span style="color:var(--text-3)">›</span>
+        <span style="color:var(--text-3)">â€º</span>
       </button>`).join('') +
       `<div class="card tight" style="text-align:center;color:var(--text-3);font-size:12.5px">
-        Postre Booking ${esc(store.config.version || '')} · ${esc(store.config.store_label || '')}
+        Postre Booking ${esc(store.config.version || '')} Â· ${esc(store.config.store_label || '')}
       </div>`;
 
     $$('[data-href]', el).forEach((b) => {
@@ -2873,9 +2953,9 @@ views['manager/more'] = {
     });
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 26. MANAGER — dispatch days (§9.8)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 26. MANAGER â€” dispatch days (Â§9.8)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 views['manager/days'] = {
   title: 'Dispatch days',
   tab: 'days',
@@ -2902,8 +2982,8 @@ views['manager/days'] = {
               <div>
                 <div style="font-weight:800">${esc(d.date_ref)}</div>
                 <div style="font-size:12.5px;color:var(--text-3)">
-                  ${esc(d.status)}${d.closed_at ? ` · closed ${esc(dateTimeLabel(d.closed_at))}` : ''}
-                  ${d.totals_snapshot ? ' · totals frozen' : ''}
+                  ${esc(d.status)}${d.closed_at ? ` Â· closed ${esc(dateTimeLabel(d.closed_at))}` : ''}
+                  ${d.totals_snapshot ? ' Â· totals frozen' : ''}
                 </div>
               </div>
               <div style="display:flex;gap:6px">
@@ -2911,10 +2991,10 @@ views['manager/days'] = {
                 ${d.status === 'CLOSED' ? `<button class="btn ghost small" data-reopen="${d.id}">Reopen</button>` : ''}
               </div>
             </div>
-          </div>`).join('') || emptyBox('📅', 'No dispatch days yet')}
+          </div>`).join('') || emptyBox('ðŸ“…', 'No dispatch days yet')}
       </div>
       <p style="color:var(--text-3);font-size:12.5px;text-align:center;margin-top:14px">
-        Days roll over automatically at the cutoff hour — see Settings.
+        Days roll over automatically at the cutoff hour â€” see Settings.
       </p>
     `;
 
@@ -2960,13 +3040,13 @@ views['manager/days'] = {
     });
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 27. RIDER — helpers + home (§10.3)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 27. RIDER â€” helpers + home (Â§10.3)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 function riderPrimary(b) {
-  if (b.status === 'ASSIGNED') return { label: '✅ Accept job', act: 'accept', cls: 'success' };
-  if (b.status === 'ACCEPTED') return { label: '📦 Mark picked up', act: 'pickup', cls: 'primary' };
-  if (b.status === 'PICKED_UP') return { label: '🎉 Mark delivered', act: 'deliver', cls: 'primary' };
+  if (b.status === 'ASSIGNED') return { label: 'âœ… Accept job', act: 'accept', cls: 'success' };
+  if (b.status === 'ACCEPTED') return { label: 'ðŸ“¦ Mark picked up', act: 'pickup', cls: 'primary' };
+  if (b.status === 'PICKED_UP') return { label: 'ðŸŽ‰ Mark delivered', act: 'deliver', cls: 'primary' };
   return null;
 }
 
@@ -2977,7 +3057,7 @@ function riderAction(id, act, label) {
   return (async () => {
     if (!navigator.onLine) {
       if (queueRiderAction(id, act, label)) {
-        toast('Offline — queued, it will send when you reconnect', 'err');
+        toast('Offline â€” queued, it will send when you reconnect', 'err');
         haptic([200, 100, 200]);
       }
       return;
@@ -2987,7 +3067,7 @@ function riderAction(id, act, label) {
     } catch (err) {
       // A network failure mid-flight is the case run() cannot recover: queue it.
       if (err && !err.status && queueRiderAction(id, act, label)) {
-        toast('No connection — queued, it will send when you reconnect', 'err');
+        toast('No connection â€” queued, it will send when you reconnect', 'err');
         haptic([200, 100, 200]);
         return;
       }
@@ -3021,18 +3101,18 @@ async function riderRequestJob(id) {
 
 /**
  * Nav affordance for a rider card. The button is ALWAYS rendered so the control
- * never appears and disappears between cards — a rider learns "there's a map
+ * never appears and disappears between cards â€” a rider learns "there's a map
  * button on every card" instead of hunting for one. When the booking carries no
- * usable coordinates it says so in words instead of vanishing (§R20: a missing
+ * usable coordinates it says so in words instead of vanishing (Â§R20: a missing
  * pin must never be mistaken for "no navigation needed").
  */
 function riderNavButton(b) {
   if (!b.nav) {
     return `<button class="btn small maps disabled" data-nav-none="${b.id}"
-              aria-label="No coordinates detected for this drop-off">📍<span class="nolabel">No coordinates</span></button>`;
+              aria-label="No coordinates detected for this drop-off">ðŸ“<span class="nolabel">No coordinates</span></button>`;
   }
   return `<button class="btn small maps" data-nav-app="${b.id}"
-            aria-label="Navigate to the drop-off pin">🗺️<span class="nolabel">Navigate</span></button>`;
+            aria-label="Navigate to the drop-off pin">ðŸ—ºï¸<span class="nolabel">Navigate</span></button>`;
 }
 
 function riderJobActions(b) {
@@ -3059,7 +3139,7 @@ function riderWireCards(el) {
     b.onclick = () => {
       const id = Number(b.getAttribute('data-id'));
       const act = b.getAttribute('data-act');
-      const label = act === 'accept' ? 'Job accepted' : (act === 'pickup' ? 'Picked up' : 'Delivered — commission accrued');
+      const label = act === 'accept' ? 'Job accepted' : (act === 'pickup' ? 'Picked up' : 'Delivered â€” commission accrued');
       fire(riderAction(id, act, label));
     };
   });
@@ -3069,11 +3149,11 @@ function riderWireCards(el) {
       if (bk) openNav(bk.waze_app, bk.waze_https);
     };
   });
-  // No pin on this booking — say WHY rather than silently doing nothing.
+  // No pin on this booking â€” say WHY rather than silently doing nothing.
   $$('[data-nav-none]', el).forEach((b) => {
     b.onclick = () => {
       haptic(10);
-      toast('No coordinates detected — open the job and read the details', 'err');
+      toast('No coordinates detected â€” open the job and read the details', 'err');
     };
   });
 }
@@ -3091,7 +3171,7 @@ function openSection(open) {
           <button class="btn primary small" data-request="${b.id}">Request this job</button>
         </div>`,
     })).join('')
-    : emptyBox('🔓', 'No open jobs right now — the next booking will appear here');
+    : emptyBox('ðŸ”“', 'No open jobs right now â€” the next booking will appear here');
 }
 
 views['rider/home'] = {
@@ -3115,17 +3195,17 @@ views['rider/home'] = {
     el.innerHTML = `
       ${earnings ? `<div class="owed-banner" style="background:linear-gradient(135deg,rgba(61,220,132,.14),rgba(61,220,132,.04));border-color:rgba(61,220,132,.4)">
         <div>
-          <div class="lbl" style="color:var(--green)">💰 My earnings</div>
+          <div class="lbl" style="color:var(--green)">ðŸ’° My earnings</div>
           <div class="amt" style="color:var(--text)">${peso(earnings.owed)}</div>
-          <div class="sub">owed · ${peso(earnings.earned)} earned all time</div>
+          <div class="sub">owed Â· ${peso(earnings.earned)} earned all time</div>
         </div>
         <button class="btn ghost small" id="go-earnings">Details</button>
       </div>` : ''}
 
-      ${reqs.length ? `<div id="sec-waiting">${section(`Waiting on the manager · ${reqs.length}`, reqs.map((r) => `
+      ${reqs.length ? `<div id="sec-waiting">${section(`Waiting on the manager Â· ${reqs.length}`, reqs.map((r) => `
         <div class="req-card">
           <div class="req-top"><div class="req-name">You requested a job</div>
-            ${r.note ? `<div class="req-note">“${esc(r.note)}”</div>` : ''}</div>
+            ${r.note ? `<div class="req-note">â€œ${esc(r.note)}â€</div>` : ''}</div>
           <div class="req-actions">
             <button class="btn ghost small" data-withdraw="${r.id}">Withdraw request</button>
           </div>
@@ -3138,14 +3218,14 @@ views['rider/home'] = {
       </div>
 
       ${openFirst
-        ? sec('sec-open', `Open jobs · ${open.length}`, openSection(open))
-          + sec('sec-mine', `My jobs · ${mine}`, mine
+        ? sec('sec-open', `Open jobs Â· ${open.length}`, openSection(open))
+          + sec('sec-mine', `My jobs Â· ${mine}`, mine
             ? [...ongoing, ...claimed].map((b) => bkCard(b, { actions: riderJobActions(b) })).join('')
-            : emptyBox('🛵', 'No job on you right now — pick one from the open board'))
-        : sec('sec-mine', `My jobs · ${mine}`, mine
+            : emptyBox('ðŸ›µ', 'No job on you right now â€” pick one from the open board'))
+        : sec('sec-mine', `My jobs Â· ${mine}`, mine
             ? [...ongoing, ...claimed].map((b) => bkCard(b, { actions: riderJobActions(b) })).join('')
-            : emptyBox('🛵', 'No job on you right now — pick one from the open board'))
-          + sec('sec-open', `Open jobs · ${open.length}`, openSection(open))}
+            : emptyBox('ðŸ›µ', 'No job on you right now â€” pick one from the open board'))
+          + sec('sec-open', `Open jobs Â· ${open.length}`, openSection(open))}
     `;
 
     riderWireCards(el);
@@ -3173,24 +3253,24 @@ views['rider/home'] = {
     });
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 28. RIDER — the open board
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 28. RIDER â€” the open board
 //
 // The standalone "Open" screen was removed: the rider Dashboard (views['rider/home'])
 // now carries the open board as its own section, so a separate tab showing the same
 // cards only made riders hunt for work in two places. The route still resolves
 // (deep links and older bookmarks don't 404 into a blank screen) by scrolling the
 // dashboard's open section into view.
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 views['rider/open'] = {
   title: 'Open jobs',
   tab: 'home',
   async mount() { location.hash = '#/rider/home'; },
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 29. RIDER — job detail: 🗺️ NAVIGATE is the biggest thing on the screen (§10.6.7)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 29. RIDER â€” job detail: ðŸ—ºï¸ NAVIGATE is the biggest thing on the screen (Â§10.6.7)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 views['rider/jobs/:id'] = {
   title: (loc) => `Job #${loc.id}`,
   tab: 'home',
@@ -3209,14 +3289,14 @@ views['rider/jobs/:id'] = {
         <div class="bk-meta">
           <span>${esc(dateTimeLabel(b.created_at))}</span>
           <span>Df ${peso(b.delivery_fee || 0)}</span>
-          ${b.priority === 'HIGH' ? '<span>🔥 HIGH</span>' : ''}
+          ${b.priority === 'HIGH' ? '<span>ðŸ”¥ HIGH</span>' : ''}
         </div>
       </div>
 
       ${b.nav
-        ? `<button class="nav-cta" id="nav-app">🗺️ NAVIGATE</button>
+        ? `<button class="nav-cta" id="nav-app">ðŸ—ºï¸ NAVIGATE</button>
            <button class="btn maps" id="nav-maps">Open in Google Maps</button>`
-        : `<div class="no-pin">📍 No drop-off pin — read the details below</div>`}
+        : `<div class="no-pin">ðŸ“ No drop-off pin â€” read the details below</div>`}
 
       ${p ? `<button class="btn ${p.cls} block" id="main-act" style="margin-bottom:9px">${p.label}</button>` : ''}
       ${(b.status === 'ASSIGNED') ? '<button class="btn danger block" id="decline">Decline this job</button>' : ''}
@@ -3225,11 +3305,11 @@ views['rider/jobs/:id'] = {
       <div class="card">
         <div class="kv"><span class="k">Customer paid</span><span class="v">${peso(b.total)}</span></div>
         <div class="kv"><span class="k">Delivery fee</span><span class="v">${peso(b.delivery_fee || 0)}</span></div>
-        <div class="kv total"><span class="k">You earn</span><span class="v">${b.rider_payout != null ? peso(b.rider_payout) : '—'}</span></div>
+        <div class="kv total"><span class="k">You earn</span><span class="v">${b.rider_payout != null ? peso(b.rider_payout) : 'â€”'}</span></div>
         ${b.status === 'DELIVERED' ? '' : '<div style="font-size:12.5px;color:var(--text-3);margin-top:6px">Your payout is fixed the moment you mark it delivered.</div>'}
       </div>
 
-      ${b.customer_phone ? `<a class="btn block" href="tel:${esc(b.customer_phone)}" style="margin-bottom:12px">📞 Call ${esc(b.customer_phone)}</a>` : ''}
+      ${b.customer_phone ? `<a class="btn block" href="tel:${esc(b.customer_phone)}" style="margin-bottom:12px">ðŸ“ž Call ${esc(b.customer_phone)}</a>` : ''}
 
       ${section('The order, exactly as pasted', `<div class="details-box">${esc(b.details_text || '(no details)')}</div>`)}
 
@@ -3241,16 +3321,16 @@ views['rider/jobs/:id'] = {
     on('#nav-maps', () => openMaps(b.google_maps));
     if (p) {
       on('#main-act', () => {
-        const label = p.act === 'accept' ? 'Job accepted' : (p.act === 'pickup' ? 'Picked up' : 'Delivered — commission accrued');
+        const label = p.act === 'accept' ? 'Job accepted' : (p.act === 'pickup' ? 'Picked up' : 'Delivered â€” commission accrued');
         fire(riderAction(b.id, p.act, label));
       });
     }
     on('#decline', () => fire(riderDecline(b.id, b.ref)));
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 30. RIDER — own history + money (§6.10.5)
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 30. RIDER â€” own history + money (Â§6.10.5)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 let riderHistoryAll = false;
 
 function earningsKw(e) {
@@ -3258,11 +3338,11 @@ function earningsKw(e) {
     <div class="kv"><span class="k">EARNED</span><span class="v money">${peso(e.earned)}</span></div>
     <div class="kv"><span class="k">PAID to you</span><span class="v money">${peso(e.paid)}</span></div>
     <div class="kv total"><span class="k">OWED to you</span><span class="v money">${peso(e.owed)}</span></div>
-    <div class="kv"><span class="k">Delivered jobs</span><span class="v">${Number(e.delivered || 0)} · avg ${peso(e.avg_per_job)}</span></div>`;
+    <div class="kv"><span class="k">Delivered jobs</span><span class="v">${Number(e.delivered || 0)} Â· avg ${peso(e.avg_per_job)}</span></div>`;
 }
 
 function riderHistoryRows(bookings) {
-  if (!bookings.length) return emptyBox('🧾', 'Nothing here yet');
+  if (!bookings.length) return emptyBox('ðŸ§¾', 'Nothing here yet');
   return bookings.map((b) => {
     const m = statusMeta(b.status);
     const reason = b.exclusion_reason || b.cancel_reason;
@@ -3272,9 +3352,9 @@ function riderHistoryRows(bookings) {
     return `<div class="card tight" data-hj="${b.id}">
       <div style="display:flex;justify-content:space-between;gap:10px">
         <div style="min-width:0">
-          <div style="font-weight:800">${esc(b.ref)} <span style="color:var(--text-3);font-weight:400;font-size:12.5px">· ${esc(b.day || dateLabel(b.created_at))}</span></div>
-          <div style="font-size:12.5px;color:var(--text-3)">${esc(b.customer_name || 'Customer')} · ${esc(m.label)}</div>
-          ${reason ? `<div style="font-size:12.5px;color:var(--amber);margin-top:3px">“${esc(reason)}”</div>` : ''}
+          <div style="font-weight:800">${esc(b.ref)} <span style="color:var(--text-3);font-weight:400;font-size:12.5px">Â· ${esc(b.day || dateLabel(b.created_at))}</span></div>
+          <div style="font-size:12.5px;color:var(--text-3)">${esc(b.customer_name || 'Customer')} Â· ${esc(m.label)}</div>
+          ${reason ? `<div style="font-size:12.5px;color:var(--amber);margin-top:3px">â€œ${esc(reason)}â€</div>` : ''}
         </div>
         <div style="text-align:right;white-space:nowrap">
           ${money}
@@ -3291,7 +3371,7 @@ function riderHistoryRows(bookings) {
  * Every peso in this block comes from the SAME split the booking was created
  * with, so it reconciles exactly:
  *     collected  =  delivery fees  +  rider payout  +  remitted to Postre
- * Showing the identity is the point — the rider can check the number before
+ * Showing the identity is the point â€” the rider can check the number before
  * handing cash in, instead of taking someone's word for it.
  */
 function remitKw(e) {
@@ -3328,7 +3408,7 @@ views['rider/history'] = {
         <button class="btn primary block small" id="req-payout" style="margin-top:10px">Request a payout</button>
       </div>
       <div class="section-title">
-        <span>Jobs · ${(out.bookings || []).length}</span>
+        <span>Jobs Â· ${(out.bookings || []).length}</span>
         <button class="btn small ghost" id="rh-csv">Export CSV</button>
       </div>
       ${riderHistoryRows(out.bookings || [])}
@@ -3354,9 +3434,9 @@ function requestPayoutSheet(owed) {
     <h3>Request a payout</h3>
     <div class="kv"><span class="k">Owed to you right now</span><span class="v money">${peso(owed)}</span></div>
     <p style="font-size:12.5px;color:var(--text-3);margin:8px 0 0">
-      This sends the manager a request. It does not move money — the manager records the payout.
+      This sends the manager a request. It does not move money â€” the manager records the payout.
     </p>
-    <div class="field" style="margin-top:12px"><span>Amount (₱)</span>
+    <div class="field" style="margin-top:12px"><span>Amount (â‚±)</span>
       <input id="rq-amt" type="text" inputmode="decimal" value="${Number(owed || 0)}"></div>
     <div class="field"><span>Note (optional)</span><input id="rq-note" type="text" placeholder="e.g. please settle today"></div>
     <div class="form-error hidden" data-err></div>
@@ -3381,9 +3461,9 @@ function requestPayoutSheet(owed) {
     ));
   };
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-// 31. RIDER — own profile. No other rider's data, no manager commission column.
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 31. RIDER â€” own profile. No other rider's data, no manager commission column.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 views['rider/profile'] = {
   title: 'My profile',
   tab: 'profile',
@@ -3405,7 +3485,7 @@ views['rider/profile'] = {
           <div>
             <div style="font-weight:800;font-size:18px">${esc(me.full_name)}</div>
             <div style="color:var(--text-3);font-size:13px">
-              @${esc(me.username)}${rider.vehicle ? ` · ${esc(rider.vehicle)}` : ''}${rider.plate ? ` · ${esc(rider.plate)}` : ''}
+              @${esc(me.username)}${rider.vehicle ? ` Â· ${esc(rider.vehicle)}` : ''}${rider.plate ? ` Â· ${esc(rider.plate)}` : ''}
             </div>
             ${rider.phone ? `<div style="color:var(--text-3);font-size:13px">${esc(rider.phone)}</div>` : ''}
           </div>
@@ -3416,14 +3496,14 @@ views['rider/profile'] = {
         <button class="btn primary block small" id="req-payout" style="margin-top:10px">Request a payout</button>
       </div>`) : section('My money', '<div class="card" style="color:var(--text-3);font-size:13.5px">Earnings are hidden by the manager.</div>')}
 
-      ${showEarnings ? section(`Payout history · ${(payouts || []).length}`, (payouts || []).length
+      ${showEarnings ? section(`Payout history Â· ${(payouts || []).length}`, (payouts || []).length
         ? (payouts || []).map((p) => `
             <div class="card tight" style="display:flex;justify-content:space-between;gap:10px">
               <div>
                 <div style="font-weight:800" class="money">${peso(p.amount)}${p.is_void ? ' <span style="color:var(--red);font-size:12px">VOID</span>' : ''}</div>
-                <div style="font-size:12.5px;color:var(--text-3)">${esc(p.method || 'CASH')} · ${esc(dateLabel(p.created_at))}</div>
+                <div style="font-size:12.5px;color:var(--text-3)">${esc(p.method || 'CASH')} Â· ${esc(dateLabel(p.created_at))}</div>
               </div>
-              ${p.note ? `<div style="font-size:12.5px;color:var(--text-2);text-align:right">“${esc(p.note)}”</div>` : ''}
+              ${p.note ? `<div style="font-size:12.5px;color:var(--text-2);text-align:right">â€œ${esc(p.note)}â€</div>` : ''}
             </div>`).join('')
         : '<div class="empty">No payouts yet</div>') : ''}
 
@@ -3449,8 +3529,8 @@ views['rider/profile'] = {
       ${section('Alerts', alertPrefsHtml())}
 
       ${section('About', `<div class="card tight">
-        <div class="kv"><span class="k">App version</span><span class="v">${esc(store.config.version || '—')}</span></div>
-        <div class="kv"><span class="k">Store</span><span class="v">${esc(store.config.store_label || '—')}</span></div>
+        <div class="kv"><span class="k">App version</span><span class="v">${esc(store.config.version || 'â€”')}</span></div>
+        <div class="kv"><span class="k">Store</span><span class="v">${esc(store.config.store_label || 'â€”')}</span></div>
         <div class="kv"><span class="k">Max jobs at once</span><span class="v">${Number(store.config.max_concurrent || 1)}</span></div>
         <button class="btn ghost block small" id="check-update" style="margin-top:12px">Check for an update</button>
       </div>`)}
@@ -3465,7 +3545,7 @@ views['rider/profile'] = {
     $('#push-off', el).onclick = () => fire(disablePush());
     $('#pf-sound', el).onchange = (e) => {
       store.sound = e.target.checked;
-      localStorage.setItem('bk_sound', store.sound ? '1' : '0');
+      lsSet('bk_sound', store.sound ? '1' : '0');
     };
     bindAlertPrefs(el);
     $('#check-update', el).onclick = () => fire(checkForUpdate(true));
@@ -3483,15 +3563,15 @@ views['rider/profile'] = {
     $('#pf-logout', el).onclick = () => logout();
   },
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// 32. boot — config, session screens, heartbeat, PWA
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 32. boot â€” config, session screens, heartbeat, PWA
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 async function refreshConfig() {
   store.config = await api('/api/config');
   if (store.config.store_label) document.title = `${store.config.store_label} Booking`;
   // The store name belongs in the BRAND slot, not the title slot: #topbar-title
   // is overwritten by the router with the current view's name, so writing here
-  // was a no-op (the old guard could never pass — textContent is never empty).
+  // was a no-op (the old guard could never pass â€” textContent is never empty).
   const brand = $('#topbar-brand');
   if (brand && store.config.store_label) brand.textContent = store.config.store_label;
   return store.config;
@@ -3503,7 +3583,7 @@ async function checkForUpdate(manual) {
     if (reg) await reg.update();
     const rel = await api('/api/release').catch(() => null);
     const label = rel && rel.build_no ? `build ${rel.build_no}` : `v${store.config.version || '?'}`;
-    toast(manual ? `You are on ${label}` : `Update check — ${label}`, 'ok');
+    toast(manual ? `You are on ${label}` : `Update check â€” ${label}`, 'ok');
   } catch (err) {
     if (manual) toast(err.message || 'Could not check for an update', 'err');
   }
@@ -3555,7 +3635,7 @@ async function afterAuth() {
   await router();
 }
 
-// ── presence heartbeat (riders only, §4.5) ────────────────────────────────────
+// â”€â”€ presence heartbeat (riders only, Â§4.5) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 let hbTimer = null;
 
 function heartbeatOnce() {
@@ -3597,10 +3677,10 @@ window.addEventListener('online', () => {
   toast('Back online', 'ok');
   if (store.token) { connectSSE(); fire(heartbeatOnce()); fire(refreshCurrent()); }
 });
-window.addEventListener('offline', () => { toast("You're offline — reads are cached", 'err'); setLive(false); });
-// ═══════════════════════════════════════════════════════════════════════════════
-// 33. login / password-change wiring (§7.2) — the two roles never share a screen
-// ═══════════════════════════════════════════════════════════════════════════════
+window.addEventListener('offline', () => { toast("You're offline â€” reads are cached", 'err'); setLive(false); });
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// 33. login / password-change wiring (Â§7.2) â€” the two roles never share a screen
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 let loginRole = 'MANAGER';
 
 function setLoginRole(role) {
@@ -3696,7 +3776,7 @@ function wireLogin() {
   if (logoutBtn) logoutBtn.onclick = () => fire(logout());
 }
 
-// ── service worker: push + notification clicks (§8.2) ─────────────────────────
+// â”€â”€ service worker: push + notification clicks (Â§8.2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function wireServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   window.addEventListener('load', () => {
@@ -3714,7 +3794,7 @@ function wireServiceWorker() {
 
 /**
  * Offline is a first-class state, not just a refusal: a persistent banner says
- * what is happening and reconnecting drains the rider-action outbox (§10.5).
+ * what is happening and reconnecting drains the rider-action outbox (Â§10.5).
  */
 function paintOffline() {
   const off = !navigator.onLine;
@@ -3723,8 +3803,8 @@ function paintOffline() {
     const pending = readOutbox().length;
     banner.textContent = off
       ? (pending
-        ? `Offline — ${pending} update${pending === 1 ? '' : 's'} waiting to send`
-        : 'Offline — you can still read; actions will send when you reconnect')
+        ? `Offline â€” ${pending} update${pending === 1 ? '' : 's'} waiting to send`
+        : 'Offline â€” you can still read; actions will send when you reconnect')
       : '';
     banner.classList.toggle('hidden', !off);
   }
@@ -3742,10 +3822,19 @@ function wireOffline() {
   paintOffline();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // 34. init
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 async function init() {
+  // Watchdog: if boot has not resolved in time, say why and offer a retry
+  // rather than leaving the splash spinning forever.
+  const watchdog = setTimeout(() => {
+    const splash = document.getElementById('splash');
+    if (splash && !splash.classList.contains('hidden')) {
+      fatalScreen('Still loading', 'This is taking longer than expected. Check your connection, then try again.');
+    }
+  }, BOOT_TIMEOUT_MS);
+
   applyTheme();
   watchSystemTheme();
   setLoginRole('MANAGER');
@@ -3763,12 +3852,16 @@ async function init() {
       store.profile = Object.assign({}, store.profile, me);
       store.save();
       await afterAuth();
+      clearTimeout(watchdog);
+      bootSettled = true;
       return;
     } catch {
       store.clear();
     }
   }
   showLogin();
+  clearTimeout(watchdog);
+  bootSettled = true;
 }
 
 init().catch(() => {

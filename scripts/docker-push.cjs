@@ -41,7 +41,13 @@ console.log(`\nPostre Booking → ${REPO}`);
 console.log(`  commit  ${sha}  ${subject}`);
 console.log(`  tag     ${shaTag}`);
 
-run('docker', ['build', '-t', shaTag, '-t', latestTag, '.']);
+run('docker', [
+  'build',
+  '--build-arg', `BK_BUILD_SHA=${sha}`,
+  '-t', shaTag,
+  '-t', latestTag,
+  '.',
+]);
 
 console.log('\n→ pushing');
 run('docker', ['push', shaTag]);
