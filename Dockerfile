@@ -43,6 +43,12 @@ FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3100
 
+# Re-declared HERE as well as in the builder: a Docker stage boundary drops
+# ARG/ENV, so setting it only in the builder left /health reporting "dev".
+# Repeated so the value is carried into the image that actually ships.
+ARG BK_BUILD_SHA=dev
+ENV BK_BUILD_SHA=${BK_BUILD_SHA}
+
 WORKDIR /app
 
 COPY --from=builder /app/node_modules ./node_modules
