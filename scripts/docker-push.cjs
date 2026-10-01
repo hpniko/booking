@@ -50,8 +50,14 @@ run('docker', ['push', latestTag]);
 const size = execFileSync('docker', ['image', 'inspect', shaTag, '--format', '{{.Size}}'], {
   encoding: 'utf8',
 }).trim();
-console.log(`\n✓ pushed ${shaTag}  (${(Number(size) / 1048576).toFixed(0)} MB)`);
-console.log('\nNext: Render → your service → Settings → Deploy → Image, set:');
-console.log(`  ${shaTag}`);
-console.log('(not :latest — Render caches public images and may serve a stale one)');
-console.log('then Manual Deploy.\n');
+console.log(`\n✓ pushed ${shaTag}  (${Number(size) / 1048576 / 1024 | 0} MB)`);
+console.log(`✓ pushed ${latestTag}  (alias — this is what Render deploys)`);
+console.log('\nNext: Render → your service → Manual Deploy. Nothing else to change.');
+console.log('\nThe service should be configured with:');
+console.log(`  ${latestTag}`);
+console.log('\n  ...and a Docker Hub credential attached, which is what makes that safe.');
+console.log('  Without a credential Render serves PUBLIC images from its own cache and');
+console.log('  can hand you a stale build. With one it always pulls fresh, so :latest');
+console.log('  behaves the way you expect.');
+console.log('\nThe SHA tag above is kept for rollback: point the image at it if a release');
+console.log('  misbehaves, then switch back to :latest.\n');

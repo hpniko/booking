@@ -87,38 +87,56 @@ npm run docker:build
 npm run docker:run     # → http://localhost:3100
 ```
 
-**4. Tag and push. Always use an immutable tag — see the warning below:**
+**4. Tag and push.** `npm run docker:push` does all of it:
 
 ```powershell
-docker tag postre-booking:latest <DOCKERHUB_USERNAME>/booking:v1.0.0
-docker push <DOCKERHUB_USERNAME>/booking:v1.0.0
+npm run docker:push
 ```
 
-Use a Docker Hub **access token** as the password, not your account password.
+It builds, then pushes two tags:
 
-> ⚠️ **Do not deploy `latest`.** Render caches public images, and pulling a
-> mutable tag can hand you a *stale* build — you deploy, change nothing, and get
-> an older image. Render's docs are explicit: use an immutable tag like
-> `v1.0.0`, or attach a registry credential. Version your tags and redeploy by
-> changing the tag in the service's settings.
+- `martincajurao/booking:<git-sha>` — immutable, for rollback
+- `martincajurao/booking:latest` — the alias Render deploys
+
+Use a Docker Hub **access token** as the password, not your account password.
 
 **5. Deploy on Render** — these are the exact Dashboard fields:
 
 1. Dashboard → **+ New** → **Web Service**
 2. Under **Source Code**, click **Existing Image**
-3. **Image URL**: `<DOCKERHUB_USERNAME>/booking:v1.0.0`
-   (a public image needs **no credentials**)
+3. **Image URL**: `docker.io/martincajurao/booking:latest`
 4. Click **Connect** once Render verifies it can read the image
 5. Set **Name**, **Region** (pick Singapore — nearest to Manila) and
    **Instance Type** → **Starter**, *not* Free
-6. Add the six env vars from Path A step 3 **before** deploying — the first boot
+6. **Attach a Docker Hub credential** — see below, this is what makes
+   `:latest` safe
+7. Add the six env vars from Path A step 3 **before** deploying — the first boot
    seeds the manager from them, so a deploy without them starts with no admin
-7. **Deploy**
+8. **Deploy**
 
 Leave **Docker Command** empty — the image's `CMD` is correct.
 
-**6. When you push a new version**, edit the tag in the service's
-**Settings → Deploy**, then hit **Manual Deploy**.
+### Attaching the credential — do not skip this
+
+Render caches images from public registries. From their docs:
+
+> pulling an image with a mutable tag (e.g. `latest`) might result in a build
+> that uses a cached, less recent version of the image. To ensure that you don't
+> use a cached public image, do one of the following: reference an immutable tag
+> when you deploy, **or add a credential to your image.**
+
+So with a credential attached, `:latest` always pulls fresh and you get the
+workflow you want: `npm run docker:push` → click **Manual Deploy**. Without one,
+Render can silently hand you a stale build.
+
+To add it: Settings → **Private Image Registry** → **Add credential**
+→ Registry: *Docker Hub* → Username: your Docker Hub username →
+Password: a Docker Hub **access token** (Settings → Security → Access tokens).
+
+### Rolling back
+
+Point the image URL back at the SHA tag printed by `npm run docker:push`, deploy,
+then switch to `:latest` again once you've fixed forward.
 
 ---
 
