@@ -1,0 +1,49 @@
+# Postre Booking — Render blueprint (https://render.com/docs/blueprint-spec)
+#
+# Deploy: Render Dashboard → New → Blueprint → point at this repo.
+# The secrets marked `sync: false` are NOT in git; Render prompts for each.
+#
+# Build:  npm ci (or `npm install`) → npm run build  (tsc → dist/, public/ → dist/public)
+# Start:  node dist/server.js  (reads PORT from the environment — Render injects it)
+#
+# NOTE ON PLAN: `starter` is deliberate, not gold-plating. The free tier spins
+# down after 15 min of inactivity, which kills every open SSE stream — riders
+# would silently stop receiving new jobs and the reconnect storm would hammer the
+# database. This is a live dispatch tool; it must stay awake. See DEPLOY.md.
+services:
+  - type: web
+    name: postre-booking
+    runtime: node
+    plan: starter
+    region: singapore
+    branch: main
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    # Every deploy restarts the process, which drops all SSE clients. The client
+    # reconnects and re-reads state on its own (see connectSSE in public/app.js),
+    # so this is a brief reconnect, not a lost update.
+    autoDeploy: true
+    envVars:
+      # ── required, secret ────────────────────────────────────────────────────
+      - key: DATABASE_URL
+        sync: false          # the existing Supabase/Postgres connection string (bk_* tables only)
+      - key: BK_JWT_SECRET
+        sync: false          # 32+ random chars — generate: node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+      - key: BK_ADMIN_USERNAME
+        sync: false          # seeds the FIRST manager only, on the very first boot
+      - key: BK_ADMIN_PASSWORD
+        sync: false          # change it immediately after the first login
+      - key: BK_VAPID_PUBLIC_KEY
+        sync: false
+      - key: BK_VAPID_PRIVATE_KEY
+        sync: false
+      - key: BK_VAPID_SUBJECT
+        value: mailto:you@example.com
+
+      # ── optional, safe defaults ─────────────────────────────────────────────
+      - key: NODE_VERSION
+        value: "22"
+      # PORT is injected by Render — do not set it.
+      # Everything else is a bk_settings row editable in-app (Settings), not env:
+      #   commission_rate · store_timezone · day_cutoff_hour · booking_max_concurrent · ...

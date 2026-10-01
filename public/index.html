@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0b0f17">
+  <title>Postre Booking</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- splash: shown until the session is resolved -->
+  <div id="splash" class="splash">
+    <div class="splash-logo">🍰</div>
+    <div class="splash-name">Postre Booking</div>
+    <div class="splash-spin"></div>
+  </div>
+
+  <!-- login: two visually distinct role tabs (§7.2) -->
+  <div id="login" class="login hidden">
+    <div class="login-hero">
+      <div class="login-logo">🍰</div>
+      <h1>Postre <span>Booking</span></h1>
+      <p class="login-sub">Live dispatch for the delivery team</p>
+    </div>
+
+    <div class="login-tabs" role="tablist">
+      <button id="tab-manager" class="login-tab active" role="tab" aria-selected="true">👔 Manager</button>
+      <button id="tab-rider" class="login-tab" role="tab" aria-selected="false">🏍 Rider</button>
+    </div>
+
+    <form id="login-form" class="login-card" autocomplete="on">
+      <label class="field">
+        <span>Username</span>
+        <input id="login-username" name="username" type="text" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required placeholder="e.g. manager">
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="••••••••">
+      </label>
+      <div id="login-error" class="form-error hidden" role="alert"></div>
+      <button type="submit" class="btn primary block" id="login-btn">Sign in as Manager</button>
+    </form>
+    <p class="login-hint">Riders get their own credentials from the manager.</p>
+  </div>
+
+  <!-- forced password change (first login) -->
+  <div id="pw-change" class="login hidden">
+    <div class="login-hero">
+      <div class="login-logo">🔑</div>
+      <h1>Set your password</h1>
+      <p class="login-sub">You must change your password before continuing</p>
+    </div>
+    <form id="pw-form" class="login-card">
+      <label class="field">
+        <span>New password</span>
+        <input id="pw-new" type="password" minlength="8" required placeholder="at least 8 characters">
+      </label>
+      <label class="field">
+        <span>Confirm password</span>
+        <input id="pw-confirm" type="password" minlength="8" required placeholder="repeat it">
+      </label>
+      <div id="pw-error" class="form-error hidden" role="alert"></div>
+      <button type="submit" class="btn primary block">Save password</button>
+    </form>
+  </div>
+
+  <!-- app frame -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span id="topbar-brand" class="topbar-brand" title="Store">🍰</span>
+        <span id="topbar-title" class="topbar-title">Dashboard</span>
+      </div>
+      <div class="topbar-right">
+        <span id="live-chip" class="live-chip" title="Live connection"><i></i> Live</span>
+        <button id="btn-logout" class="icon-btn" aria-label="Sign out" title="Sign out">⏻</button>
+      </div>
+    </header>
+
+    <div id="offline-banner" class="offline-banner hidden" role="status" aria-live="polite"></div>
+
+    <main id="view" class="view" aria-live="polite"></main>
+
+    <nav id="bottom-nav" class="bottom-nav" aria-label="Primary"></nav>
+  </div>
+
+  <!-- sheet / modal root -->
+  <div id="sheet-root"></div>
+  <!-- toast root -->
+  <div id="toast-root" class="toast-root" aria-live="assertive"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
