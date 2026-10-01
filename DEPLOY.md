@@ -87,22 +87,38 @@ npm run docker:build
 npm run docker:run     # → http://localhost:3100
 ```
 
-**4. Tag and push:**
+**4. Tag and push. Always use an immutable tag — see the warning below:**
 
 ```powershell
-docker login
-docker tag postre-booking:latest <DOCKERHUB_USERNAME>/booking:latest
-docker push <DOCKERHUB_USERNAME>/booking:latest
+docker tag postre-booking:latest <DOCKERHUB_USERNAME>/booking:v1.0.0
+docker push <DOCKERHUB_USERNAME>/booking:v1.0.0
 ```
 
 Use a Docker Hub **access token** as the password, not your account password.
 
-**5. Deploy on Render** — Dashboard → **New → Image** → enter
-`<DOCKERHUB_USERNAME>/booking`. A public image needs no registry credentials.
-For a private image, add the Docker Hub token under Render's **Private Image
-Registry** settings.
+> ⚠️ **Do not deploy `latest`.** Render caches public images, and pulling a
+> mutable tag can hand you a *stale* build — you deploy, change nothing, and get
+> an older image. Render's docs are explicit: use an immutable tag like
+> `v1.0.0`, or attach a registry credential. Version your tags and redeploy by
+> changing the tag in the service's settings.
 
-Then set the same six env vars listed in Path A step 3.
+**5. Deploy on Render** — these are the exact Dashboard fields:
+
+1. Dashboard → **+ New** → **Web Service**
+2. Under **Source Code**, click **Existing Image**
+3. **Image URL**: `<DOCKERHUB_USERNAME>/booking:v1.0.0`
+   (a public image needs **no credentials**)
+4. Click **Connect** once Render verifies it can read the image
+5. Set **Name**, **Region** (pick Singapore — nearest to Manila) and
+   **Instance Type** → **Starter**, *not* Free
+6. Add the six env vars from Path A step 3 **before** deploying — the first boot
+   seeds the manager from them, so a deploy without them starts with no admin
+7. **Deploy**
+
+Leave **Docker Command** empty — the image's `CMD` is correct.
+
+**6. When you push a new version**, edit the tag in the service's
+**Settings → Deploy**, then hit **Manual Deploy**.
 
 ---
 
