@@ -11,7 +11,9 @@
     "gen:vapid": "tsx -r dotenv/config src/services/gen-vapid.ts",
     "verify:boundary": "tsx scripts/verify-boundary.ts",
     "verify:audit": "tsx -r dotenv/config scripts/audit-e2e.ts",
-    "verify": "npm run verify:boundary && npm run verify:audit"
+    "verify": "npm run verify:boundary && npm run verify:audit",
+    "docker:build": "docker build -t postre-booking:latest .",
+    "docker:run": "docker run --rm -p 3100:3100 --env-file .env postre-booking:latest"
   },
   "engines": {
     "node": ">=22 <23"

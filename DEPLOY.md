@@ -7,15 +7,28 @@ connection and a handful of secrets.
 `render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec), so
 the whole service is defined in version control.
 
+There are **two ways** to get the image onto Render:
+
+| | Path A — Render builds it | Path B — Docker Hub |
+|---|---|---|
+| Setup | Blueprint from the repo | Push image, then **New → Image** |
+| Builds on | Render's machines | your machine |
+| Version bumps | automatic on every push | manual: rebuild, retag, push |
+| Needs | `render.yaml` only | Docker Desktop + a Docker Hub repo |
+
+Pick **A** for `git push → deployed`. Pick **B** to deploy the exact image you
+tested locally.
+
 ---
 
-## One-time setup
+## Path A — Render builds from the repo
 
-**1. Push the repo to GitHub** (Render builds from git):
+### Setup
+
+**1. Push the repo to GitHub** (the repo is already connected as `origin`):
 
 ```powershell
-git remote add origin https://github.com/<you>/sofiapostrebooking.git
-git push -u origin main
+git push
 ```
 
 **2. Create the Blueprint** — Render Dashboard → **New → Blueprint** → select the
@@ -47,6 +60,49 @@ Look for `[migrate] bk_* schema up to date` and `"ok":true` in the logs.
 
 **5. Sign in and change the admin password**, then add riders under
 **More → Riders**.
+
+---
+
+## Path B — Docker Hub
+
+The image is safe to publish **publicly**: `.dockerignore` excludes `.env`, and
+every secret is supplied at runtime as an env var, so nothing sensitive is baked
+into a layer. (Verified: no runtime secret value appears anywhere in `dist/`.)
+
+**1. Create a public repository** on <https://hub.docker.com> — e.g. `booking`,
+under your Docker Hub namespace.
+
+**2. Start Docker Desktop.** `docker` commands fail with a named-pipe error
+until the daemon is running; the CLI being on PATH is not enough. Check with:
+
+```powershell
+docker info
+```
+
+**3. Build and test locally first** — worth doing before Render, so any failure
+shows up on your machine instead of in Render's build log:
+
+```powershell
+npm run docker:build
+npm run docker:run     # → http://localhost:3100
+```
+
+**4. Tag and push:**
+
+```powershell
+docker login
+docker tag postre-booking:latest <DOCKERHUB_USERNAME>/booking:latest
+docker push <DOCKERHUB_USERNAME>/booking:latest
+```
+
+Use a Docker Hub **access token** as the password, not your account password.
+
+**5. Deploy on Render** — Dashboard → **New → Image** → enter
+`<DOCKERHUB_USERNAME>/booking`. A public image needs no registry credentials.
+For a private image, add the Docker Hub token under Render's **Private Image
+Registry** settings.
+
+Then set the same six env vars listed in Path A step 3.
 
 ---
 
