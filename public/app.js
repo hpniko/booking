@@ -780,7 +780,7 @@ function scheduleRefresh() {
  */
 const NAV = {
   MANAGER: [
-    { key: 'dashboard', label: 'Home', icon: '🏠' },
+    { key: 'dashboard', label: 'Dashboard', icon: '🏠' },
     { key: 'bookings', label: 'Jobs', icon: '📋' },
     { key: 'chat', label: 'Chat', icon: '💬', badge: true },
     { key: 'riders', label: 'Riders', icon: '🏍' },
@@ -794,8 +794,9 @@ const NAV = {
     { key: 'profile', label: 'My profile', icon: '👔', desk: true },
   ],
   RIDER: [
-    { key: 'home', label: 'Jobs', icon: '📦' },
-    { key: 'open', label: 'Open', icon: '🔓' },
+    // Open jobs live ON this dashboard, so the separate "Open" tab that used to
+    // duplicate them is gone — one screen, four tabs, nothing repeated.
+    { key: 'home', label: 'Dashboard', icon: '🏠' },
     { key: 'chat', label: 'Chat', icon: '💬', center: true, badge: true },
     { key: 'history', label: 'History', icon: '🧾' },
     { key: 'profile', label: 'Profile', icon: '👤' },
@@ -854,7 +855,7 @@ function goTab(role, key) {
       days: '#/manager/days', settings: '#/manager/settings', profile: '#/manager/profile',
     },
     RIDER: {
-      home: '#/rider/home', open: '#/rider/open', chat: '#/rider/chat',
+      home: '#/rider/home', chat: '#/rider/chat',
       history: '#/rider/history', profile: '#/rider/profile',
     },
   };
@@ -3048,8 +3049,24 @@ function riderWireCards(el) {
   });
 }
 
+/** Section wrapped in a scroll anchor, so the stat strip can jump to it. */
+function sec(id, title, body) {
+  return `<div id="${id}">${section(title, body)}</div>`;
+}
+
+/** The open board as it appears on the rider Dashboard. */
+function openSection(open) {
+  return open.length
+    ? open.map((b) => bkCard(b, {
+      actions: `<div class="bk-actions">
+          <button class="btn primary small" data-request="${b.id}">Request this job</button>
+        </div>`,
+    })).join('')
+    : emptyBox('🔓', 'No open jobs right now — the next booking will appear here');
+}
+
 views['rider/home'] = {
-  title: 'My jobs',
+  title: 'Dashboard',
   tab: 'home',
   async mount(el) {
     const home = await api('/api/rider/home');
@@ -3061,6 +3078,10 @@ views['rider/home'] = {
     const ongoing = home.ongoing || [];
     const claimed = home.claimed || [];
     const open = home.open || [];
+    const mine = ongoing.length + claimed.length;
+    // A rider with nothing on them has nothing to do but pick up work, so the
+    // open board leads; otherwise the job in hand comes first.
+    const openFirst = mine === 0;
 
     el.innerHTML = `
       ${earnings ? `<div class="owed-banner" style="background:linear-gradient(135deg,rgba(61,220,132,.14),rgba(61,220,132,.04));border-color:rgba(61,220,132,.4)">
@@ -3072,26 +3093,30 @@ views['rider/home'] = {
         <button class="btn ghost small" id="go-earnings">Details</button>
       </div>` : ''}
 
-      ${reqs.length ? section(`Waiting on the manager · ${reqs.length}`, reqs.map((r) => `
+      ${reqs.length ? `<div id="sec-waiting">${section(`Waiting on the manager · ${reqs.length}`, reqs.map((r) => `
         <div class="req-card">
           <div class="req-top"><div class="req-name">You requested a job</div>
             ${r.note ? `<div class="req-note">“${esc(r.note)}”</div>` : ''}</div>
           <div class="req-actions">
             <button class="btn ghost small" data-withdraw="${r.id}">Withdraw request</button>
           </div>
-        </div>`).join('')) : ''}
+        </div>`).join(''))}</div>` : ''}
 
-      ${section(`My jobs · ${ongoing.length + claimed.length}`, (ongoing.length + claimed.length)
-        ? [...ongoing, ...claimed].map((b) => bkCard(b, { actions: riderJobActions(b) })).join('')
-        : emptyBox('🛵', 'No job on you right now — pick one from the open board') )}
+      <div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
+        <button class="stat ongoing" data-scroll="sec-mine"><span class="n">${mine}</span><span class="l">On you</span></button>
+        <button class="stat open" data-scroll="sec-open"><span class="n">${open.length}</span><span class="l">Open jobs</span></button>
+        <button class="stat claimed" data-scroll="sec-waiting"><span class="n">${reqs.length}</span><span class="l">Waiting</span></button>
+      </div>
 
-      ${section(`Open jobs · ${open.length}`, open.length
-        ? open.map((b) => bkCard(b, {
-          actions: `<div class="bk-actions">
-              <button class="btn primary small" data-request="${b.id}">Request this job</button>
-            </div>`,
-        })).join('')
-        : emptyBox('🔓', 'The board is empty right now'))}
+      ${openFirst
+        ? sec('sec-open', `Open jobs · ${open.length}`, openSection(open))
+          + sec('sec-mine', `My jobs · ${mine}`, mine
+            ? [...ongoing, ...claimed].map((b) => bkCard(b, { actions: riderJobActions(b) })).join('')
+            : emptyBox('🛵', 'No job on you right now — pick one from the open board'))
+        : sec('sec-mine', `My jobs · ${mine}`, mine
+            ? [...ongoing, ...claimed].map((b) => bkCard(b, { actions: riderJobActions(b) })).join('')
+            : emptyBox('🛵', 'No job on you right now — pick one from the open board'))
+          + sec('sec-open', `Open jobs · ${open.length}`, openSection(open))}
     `;
 
     riderWireCards(el);
@@ -3100,6 +3125,12 @@ views['rider/home'] = {
 
     $$('[data-request]', el).forEach((b) => {
       b.onclick = () => fire(riderRequestJob(Number(b.getAttribute('data-request'))));
+    });
+    $$('[data-scroll]', el).forEach((b) => {
+      b.onclick = () => {
+        const target = $('#' + b.getAttribute('data-scroll'), el);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
     });
     $$('[data-withdraw]', el).forEach((b) => {
       b.onclick = () => fire((async () => {
@@ -3115,25 +3146,17 @@ views['rider/home'] = {
 };
 // ═══════════════════════════════════════════════════════════════════════════════
 // 28. RIDER — the open board
+//
+// The standalone "Open" screen was removed: the rider Dashboard (views['rider/home'])
+// now carries the open board as its own section, so a separate tab showing the same
+// cards only made riders hunt for work in two places. The route still resolves
+// (deep links and older bookmarks don't 404 into a blank screen) by scrolling the
+// dashboard's open section into view.
 // ═══════════════════════════════════════════════════════════════════════════════
 views['rider/open'] = {
   title: 'Open jobs',
-  tab: 'open',
-  async mount(el) {
-    const open = await api('/api/rider/jobs?scope=open');
-    indexBookings([open]);
-    el.innerHTML = open.length
-      ? open.map((b) => bkCard(b, {
-        actions: `<div class="bk-actions">
-            <button class="btn primary small" data-request="${b.id}">Request this job</button>
-          </div>`,
-      })).join('')
-      : emptyBox('🔓', 'The board is empty right now');
-
-    $$('[data-request]', el).forEach((b) => {
-      b.onclick = () => fire(riderRequestJob(Number(b.getAttribute('data-request'))));
-    });
-  },
+  tab: 'home',
+  async mount() { location.hash = '#/rider/home'; },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
