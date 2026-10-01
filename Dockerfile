@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+#
+# Postre Booking — production image.
+#
+# Multi-stage so the runtime layer carries NO build toolchain: TypeScript and
+# @types/* exist only in the builder. The runtime installs --omit=dev.
+#
+# Build:  docker build -t postre-booking .
+# Run:    docker run --env-file .env -p 3100:3100 postre-booking
+#
+# Node 22 matches "engines": { "node": ">=22 <23" } in package.json.
+
+# ── builder: compile TypeScript and assemble the SPA ──────────────────────────
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+# Dependencies first, and only the manifests — this layer is cached until the
+# lockfile actually changes, so ordinary source edits skip the npm install.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY src ./src
+COPY public ./public
+
+# Runs: tsc  →  dist/, then copies public/ → dist/public/
+RUN npm run build
+
+# Prune to production dependencies and carry them into the runtime stage,
+# rather than running npm ci a second time on the other side of the build.
+RUN npm prune --omit=dev
+
+# ── runtime: server + static shell only ──────────────────────────────────────
+FROM node:22-alpine AS runtime
+
+ENV NODE_ENV=production \
+    PORT=3100
+
+WORKDIR /app
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY package.json ./
+
+# REQUIRED. src/db/migrate.ts resolves the schema via
+#   path.join(__dirname, '..', '..', 'migrations', '001_bk_init.sql')
+# and dist/db/ is two levels below /app, so this file must sit at
+# /app/migrations or the app throws "001_bk_init.sql not found" on boot.
+COPY migrations ./migrations
+
+# The official node image ships an unprivileged `node` user (uid 1000).
+# Running as root in a container is unnecessary and widens the blast radius.
+USER node
+
+EXPOSE 3100
+
+# No curl/wget guaranteed in the runtime image — use node itself so the probe
+# has zero extra dependencies.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3100)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+
+# Render injects PORT and routes HTTPS traffic here; the app binds 0.0.0.0.
+CMD ["node", "dist/server.js"]

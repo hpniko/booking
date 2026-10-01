@@ -1,0 +1,39 @@
+# Keep the build context small and, more importantly, keep SECRETS OUT of the
+# image layers. .env is listed here as well as in .gitignore — defence in depth:
+# a stray `COPY . .` could otherwise bake your DATABASE_URL and JWT secret into
+# a published layer.
+
+# secrets — never bake these in
+.env
+.env.*
+!.env.example
+
+# dependencies & build output (rebuilt inside the image)
+node_modules
+dist
+npm-debug.log*
+
+# local runtime noise
+*.log
+dev.err.log
+
+# VCS & editor
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# docs & tooling not needed at runtime
+BOOKING_APP_PLAN.md
+DEPLOY.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# the APK output (gitignored already)
+public/apk
+
+# OS cruft
+.DS_Store
+Thumbs.db

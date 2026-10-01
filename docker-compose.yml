@@ -1,0 +1,32 @@
+# Postre Booking — run the containerized app locally.
+#   docker compose up --build
+#   → http://localhost:3100
+#
+# The DATABASE_URL still points at your real Postgres/Supabase instance — the
+# schema is additive and idempotent, so booting the container against the same
+# database as `npm run dev` is safe.
+#
+# For Render, see render.yaml + DEPLOY.md. This file is for local use only.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: postre-booking:local
+    container_name: postre-booking
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    env_file:
+      - .env
+    environment:
+      # Force in-container networking; overrides any PORT from .env.
+      PORT: "3100"
+      NODE_ENV: production
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3100/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

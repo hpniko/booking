@@ -3,7 +3,12 @@
 # Deploy: Render Dashboard → New → Blueprint → point at this repo.
 # The secrets marked `sync: false` are NOT in git; Render prompts for each.
 #
-# Build:  npm ci (or `npm install`) → npm run build  (tsc → dist/, public/ → dist/public)
+# runtime: docker — Render builds the image from ./Dockerfile and ignores the
+# build/start commands below (they're there for the dashboard's benefit and for
+# `npm run build` / `npm start` locally).
+#
+# Build:  multi-stage → tsc → dist/, public/ → dist/public, no build toolchain
+#         in the runtime layer.
 # Start:  node dist/server.js  (reads PORT from the environment — Render injects it)
 #
 # NOTE ON PLAN: `starter` is deliberate, not gold-plating. The free tier spins
@@ -13,16 +18,15 @@
 services:
   - type: web
     name: postre-booking
-    runtime: node
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     plan: starter
     region: singapore
     branch: main
-    buildCommand: npm ci && npm run build
-    startCommand: npm start
     healthCheckPath: /health
-    # Every deploy restarts the process, which drops all SSE clients. The client
-    # reconnects and re-reads state on its own (see connectSSE in public/app.js),
-    # so this is a brief reconnect, not a lost update.
+    # Every deploy restarts the container, which drops all SSE clients. The
+    # client reconnects and re-reads state on its own (see connectSSE in
+    # public/app.js), so this is a brief reconnect, not a lost update.
     autoDeploy: true
     envVars:
       # ── required, secret ────────────────────────────────────────────────────
@@ -41,7 +45,7 @@ services:
       - key: BK_VAPID_SUBJECT
         value: mailto:you@example.com
 
-      # ── optional, safe defaults ─────────────────────────────────────────────
+      # ── optional ────────────────────────────────────────────────────────────
       - key: NODE_VERSION
         value: "22"
       # PORT is injected by Render — do not set it.
