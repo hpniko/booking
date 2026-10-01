@@ -13,7 +13,8 @@
     "verify:audit": "tsx -r dotenv/config scripts/audit-e2e.ts",
     "verify": "npm run verify:boundary && npm run verify:audit",
     "docker:build": "docker build -t postre-booking:latest .",
-    "docker:run": "docker run --rm -p 3100:3100 --env-file .env postre-booking:latest"
+    "docker:run": "docker run --rm -p 3100:3100 --env-file .env postre-booking:latest",
+    "docker:push": "node scripts/docker-push.cjs"
   },
   "engines": {
     "node": ">=22 <23"
