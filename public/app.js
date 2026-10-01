@@ -1243,6 +1243,11 @@ views['manager/dashboard'] = {
     })).join('');
 
     el.innerHTML = `
+      <button class="btn primary block cta-new" data-new-bk>
+        <span class="cta-main">＋ New booking</span>
+        <span class="cta-sub">Paste the booking from Messenger</span>
+      </button>
+
       ${day ? `<div class="card tight" style="display:flex;justify-content:space-between;align-items:center;gap:10px">
         <div>
           <strong>Dispatch day ${esc(day.date_ref)}</strong>
@@ -1338,6 +1343,12 @@ function wireDashboard(el, d, reqs) {
   });
   const days = $('[data-days]', el);
   if (days) days.onclick = () => { location.hash = '#/manager/days'; };
+  // One tap from landing on the dashboard to the paste screen. Creating a
+  // booking is the manager's most frequent action, and on a phone it used to be
+  // buried three taps deep behind the More hub.
+  $$('[data-new-bk]', el).forEach((b) => {
+    b.onclick = () => { haptic(10); location.hash = '#/manager/new'; };
+  });
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 // 15. MANAGER — full board (§10.2)
@@ -1600,15 +1611,16 @@ views['manager/new'] = {
   live: false,   // never repaint over a half-typed paste
   async mount(el) {
     el.innerHTML = `
+      <button class="btn block cta-clip" id="btn-clip">
+        <span class="cta-main">📋 Paste from clipboard</span>
+        <span class="cta-sub">Fastest route — the booking is usually already copied</span>
+      </button>
       <div class="card">
         <div class="field">
           <span>Paste the Messenger booking here</span>
-          <textarea id="raw" rows="12" placeholder="Paste everything — the app reads only Total, Df and the Waze pin.&#10;Everything else is kept verbatim for the rider."></textarea>
+          <textarea id="raw" rows="10" placeholder="Paste everything — the app reads only Total, Df and the Waze pin.&#10;Everything else is kept verbatim for the rider."></textarea>
         </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn" id="btn-clip">📋 Paste from clipboard</button>
-          <button class="btn primary" id="btn-read">Read details</button>
-        </div>
+        <button class="btn primary block" id="btn-read">Read details</button>
         <div class="form-error hidden" id="parse-err" style="margin-top:12px"></div>
       </div>
       <div id="preview"></div>
